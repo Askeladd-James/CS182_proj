@@ -4,100 +4,152 @@ from torch.utils.data import Dataset, DataLoader
 import torch
 from pathlib import Path
 import logging
+from datetime import datetime
+import pytz
 
 data_path = r'./data/'
 
 class MovieLensDataset(Dataset):
-    def __init__(self, users, movies, ratings):
+    def __init__(self, users, movies, ratings, daytime, weekend, years):
         self.users = torch.LongTensor(users)
         self.movies = torch.LongTensor(movies)
         self.ratings = torch.FloatTensor(ratings)
+        self.daytime = torch.LongTensor(daytime)
+        self.weekend = torch.LongTensor(weekend)
+        self.years = torch.LongTensor(years)
 
     def __len__(self):
         return len(self.ratings)
 
     def __getitem__(self, idx):
-        return self.users[idx], self.movies[idx], self.ratings[idx]
+        return (self.users[idx], self.movies[idx], self.ratings[idx], 
+                self.daytime[idx], self.weekend[idx], self.years[idx])
 
 def load_data(ratings_path, users_path, movies_path):
     """加载并预处理数据"""
-    # 读取数据
-    ratings = pd.read_csv(ratings_path, sep='\t', encoding='latin-1',
-                         usecols=['user_id', 'movie_id', 'user_emb_id', 'movie_emb_id', 'rating'])
+    # 读取数据（需要包含timestamp列）
+    ratings = pd.read_csv(ratings_path, sep='\t', encoding='latin-1')
     users = pd.read_csv(users_path, sep='\t', encoding='latin-1',
                        usecols=['user_id', 'gender', 'zipcode', 'age_desc', 'occ_desc'])
     movies = pd.read_csv(movies_path, sep='\t', encoding='latin-1',
                         usecols=['movie_id', 'title', 'genres'])
     
+    # 添加时间特征
+    ratings['daytime'] = ratings['timestamp'].apply(daytime)
+    ratings['is_weekend'] = ratings['timestamp'].apply(is_weekend)
+    ratings['year'] = ratings['timestamp'].apply(get_year_category)
+    
     return ratings, users, movies
 
-def split_data(ratings, val_size=0.1, test_size=0.2, random_state=42):
-    """将数据集分割为训练集、验证集和测试集"""
-    # 随机打乱数据
-    shuffled_ratings = ratings.sample(frac=1., random_state=random_state)
-    
-    # 计算分割点
-    n_samples = len(shuffled_ratings)
-    test_idx = int(n_samples * (1 - test_size))
-    val_idx = int(test_idx * (1 - val_size))
-    
-    # 分割数据
-    train_data = shuffled_ratings[:val_idx]
-    val_data = shuffled_ratings[val_idx:test_idx]
-    test_data = shuffled_ratings[test_idx:]
-    
-    return train_data, val_data, test_data
-
-def save_split_data(train_data, val_data, test_data, base_path):
-    """保存分割后的数据集"""
+def daytime(timestamp):
+    """判断时间段"""
     try:
-        # 确保目录存在
-        Path(base_path).parent.mkdir(parents=True, exist_ok=True)
+        us_tz = pytz.timezone('US/Eastern')
+        dt = datetime.fromtimestamp(timestamp, tz=pytz.UTC)
+        dt = dt.astimezone(us_tz)
+        hour = dt.hour
         
-        # 保存数据
-        # for name, data in [('train', train_data), ('val', val_data), ('test', test_data)]:
-        #     save_path = f"{base_path}_{name}.csv"
-        #     data.to_csv(save_path, sep='\t', index=False, encoding='latin-1')
-            # logging.info(f"保存{name}数据到: {save_path}")
-            
-        # 保存分割索引
-        split_indices = {
-            'train_indices': train_data.index.tolist(),
-            'val_indices': val_data.index.tolist(),
-            'test_indices': test_data.index.tolist()
-        }
-        torch.save(split_indices, base_path + '_indices.pt')
-        
-    except Exception as e:
-        logging.error(f"保存数据集失败: {str(e)}")
-        raise
+        if 0 <= hour < 6:
+            return 0  # 凌晨
+        elif 6 <= hour < 18:
+            return 1  # 白天
+        else:
+            return 2  # 晚上
+    except:
+        return 1
 
-def load_test_data(ratings_path, split_indices_path):
+def is_weekend(timestamp):
+    """判断是否周末"""
+    try:
+        us_tz = pytz.timezone('US/Eastern')
+        dt = datetime.fromtimestamp(timestamp, tz=pytz.UTC)
+        dt = dt.astimezone(us_tz)
+        weekday = dt.weekday()
+        return 1 if weekday >= 5 else 0
+    except:
+        return 0
+
+def get_year_category(timestamp):
+    """将时间戳转换为年份类别（相对于数据集起始年份）"""
+    try:
+        dt = datetime.fromtimestamp(timestamp)
+        year = dt.year
+        # 假设数据集从1995年开始，映射到0-19的范围
+        base_year = 1995
+        year_category = max(0, min(19, year - base_year))
+        return year_category
+    except:
+        return 0
+    
+    
+def create_time_aware_split(ratings, test_ratio=0.1, val_ratio=0.1, random_state=42):
+    """
+    创建时间感知的数据分割
+    对每个用户随机抽取一定比例的评分作为测试集
+    """
+    np.random.seed(random_state)
+    
+    train_data = []
+    val_data = []
+    test_data = []
+    
+    # 按用户分组
+    for user_id in ratings['user_id'].unique():
+        user_ratings = ratings[ratings['user_id'] == user_id].copy()
+        
+        # 按时间排序
+        user_ratings = user_ratings.sort_values('timestamp')
+        
+        n_ratings = len(user_ratings)
+        if n_ratings < 3:  # 如果用户评分太少，全部作为训练集
+            train_data.append(user_ratings)
+            continue
+        
+        # 随机选择测试集索引
+        test_size = max(1, int(n_ratings * test_ratio))
+        val_size = max(1, int(n_ratings * val_ratio))
+        
+        # 随机选择索引
+        all_indices = list(range(n_ratings))
+        test_indices = np.random.choice(all_indices, test_size, replace=False)
+        remaining_indices = [i for i in all_indices if i not in test_indices]
+        
+        if len(remaining_indices) > val_size:
+            val_indices = np.random.choice(remaining_indices, val_size, replace=False)
+            train_indices = [i for i in remaining_indices if i not in val_indices]
+        else:
+            val_indices = remaining_indices[:val_size]
+            train_indices = remaining_indices[val_size:]
+        
+        # 分割数据 - 修复这里的问题
+        test_data.append(user_ratings.iloc[test_indices])
+        if len(val_indices) > 0:  # 修改：检查长度而不是直接用 if val_indices
+            val_data.append(user_ratings.iloc[val_indices])
+        if len(train_indices) > 0:  # 修改：检查长度而不是直接用 if train_indices
+            train_data.append(user_ratings.iloc[train_indices])
+    
+    # 合并所有用户的数据
+    train_df = pd.concat(train_data, ignore_index=True) if train_data else pd.DataFrame()
+    val_df = pd.concat(val_data, ignore_index=True) if val_data else pd.DataFrame()
+    test_df = pd.concat(test_data, ignore_index=True) if test_data else pd.DataFrame()
+    
+    return train_df, val_df, test_df
+
+def save_split_data(train_data, val_data, test_data, split_path):
+    """保存分割后的数据"""
+    Path(split_path).mkdir(parents=True, exist_ok=True)
+    train_data.to_csv(f'{split_path}/train.csv', sep='\t', index=False)
+    val_data.to_csv(f'{split_path}/val.csv', sep='\t', index=False)
+    test_data.to_csv(f'{split_path}/test.csv', sep='\t', index=False)
+
+def load_test_data(ratings_path, split_path):
     """加载测试数据"""
-    try:
-        # 使用正确的分隔符加载原始数据
-        ratings = pd.read_csv(ratings_path, sep='\t', encoding='latin-1')
-        
-        # 确保列名正确（移除可能的前缀）
-        ratings.columns = ratings.columns.str.strip('\t')
-        
-        # 加载分割索引
-        split_indices = torch.load(split_indices_path + '_indices.pt')
-        test_indices = split_indices['test_indices']
-        
-        # 获取测试数据
-        test_data = ratings.loc[test_indices].copy()
-        
-        # 重置索引
-        test_data = test_data.reset_index(drop=True)
-        
-        # 数据格式验证
-        # logging.info("测试数据加载完成，验证数据格式...")
-        # logging.info(f"列名: {test_data.columns.tolist()}")
-        # logging.info("\n" + str(test_data.head()))
-        
-        return test_data
-        
-    except Exception as e:
-        logging.error(f"加载测试数据失败: {str(e)}")
-        raise
+    test_data = pd.read_csv(f'{split_path}/test.csv', sep='\t')
+    # 确保测试数据包含必要的时间特征
+    if 'daytime' not in test_data.columns:
+        test_data['daytime'] = test_data['timestamp'].apply(daytime)
+    if 'is_weekend' not in test_data.columns:
+        test_data['is_weekend'] = test_data['timestamp'].apply(is_weekend)
+    if 'year' not in test_data.columns:
+        test_data['year'] = test_data['timestamp'].apply(get_year_category)
+    return test_data
