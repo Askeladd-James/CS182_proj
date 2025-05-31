@@ -1,9 +1,11 @@
 import torch
+from torch.serialization import add_safe_globals, safe_globals
 import numpy as np
+import numpy._globals
 import pandas as pd
 from sklearn.metrics import mean_absolute_error
 import logging
-from data_process import load_data, split_data, MovieLensDataset
+from data_process import load_data, split_data, load_test_data, MovieLensDataset, data_path
 from model import CFModel
 
 def evaluate_model(model, test_data, device):
@@ -56,21 +58,47 @@ def get_user_recommendations(model, user_id, ratings, movies, device, n_recommen
     recommendations = sorted(predictions, key=lambda x: x[2], reverse=True)[:n_recommendations]
     return recommendations
 
+def load_checkpoint(path):
+    """安全加载模型检查点"""
+    try:
+        # 添加所有需要的安全全局变量
+        add_safe_globals([
+            np.core.multiarray.scalar,
+            np.dtype,
+        ])
+        
+        # 使用 safe_globals 上下文管理器
+        with safe_globals([np.core.multiarray.scalar, np.dtype]):
+            return torch.load(
+                path,
+                weights_only=False,
+                map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            )
+    except Exception as e:
+        logging.error(f"加载模型失败: {str(e)}")
+        raise
+
 def main():
     # 加载保存的模型
     logging.basicConfig(level=logging.INFO)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    checkpoint = torch.load('model_checkpoint.pt')
+
+    checkpoint = load_checkpoint(data_path + 'model_checkpoint.pt')
     
     model = CFModel(
         checkpoint['max_userid'] + 1,
         checkpoint['max_movieid'] + 1,
         checkpoint['k_factors']
     ).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['best_model_state'])
     
     # 加载测试数据
-    _, test_data = split_data(load_data('ratings.csv', 'users.csv', 'movies.csv')[0])
+    test_data = load_test_data(
+        data_path + 'ratings.csv',
+        checkpoint['data_split_path']
+    )
+
+    # print(test_data.head())  # 打印测试数据的前几行以确认加载正确
     
     # 评估模型
     metrics = evaluate_model(model, test_data, device)
