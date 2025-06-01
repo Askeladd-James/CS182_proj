@@ -1,3 +1,3 @@
 .vscode
 data/split_data
-data/model_checkpoint.pt
+data/*.pt

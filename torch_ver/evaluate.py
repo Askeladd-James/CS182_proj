@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error
 import logging
 from data_process import load_data, load_test_data, MovieLensDataset, data_path
-from model import CFModel, TimeAwareCFModel
+from model import CFModel, TimeAwareCFModel, SimplifiedTimeAwareCFModel, Models
 
 def evaluate_model(model, test_data, device):
     """评估模型性能"""
@@ -147,26 +147,84 @@ def load_checkpoint(path):
         logging.error(f"加载模型失败: {str(e)}")
         raise
 
+def create_model_from_checkpoint(checkpoint, device):
+    """根据checkpoint中的model_type创建正确的模型"""
+    model_type = checkpoint.get('model_type', 'SimplifiedTimeAwareCFModel')  # 默认值
+    
+    max_userid = checkpoint['max_userid']
+    max_movieid = checkpoint['max_movieid']
+    k_factors = checkpoint['k_factors']
+    time_factors = checkpoint.get('time_factors', 10)  # 向后兼容
+    reg_strength = checkpoint.get('reg_strength', 0.01)  # 默认正则化强度
+    
+    logging.info(f"Creating model of type: {model_type}")
+    
+    if model_type == 'CFModel':
+        model = CFModel(
+            max_userid + 1,
+            max_movieid + 1,
+            k_factors,
+            time_factors,
+            reg_strength
+        ).to(device)
+    elif model_type == 'TimeAwareCFModel':
+        model = TimeAwareCFModel(
+            max_userid + 1,
+            max_movieid + 1,
+            k_factors,
+            time_factors,
+            reg_strength
+        ).to(device)
+    elif model_type == 'SimplifiedTimeAwareCFModel':
+        model = SimplifiedTimeAwareCFModel(
+            max_userid + 1,
+            max_movieid + 1,
+            k_factors,
+            time_factors,
+            reg_strength
+        ).to(device)
+    else:
+        # 如果model_type不存在或不匹配，使用默认模型
+        logging.warning(f"Unknown model_type: {model_type}, using SimplifiedTimeAwareCFModel as default")
+        model = SimplifiedTimeAwareCFModel(
+            max_userid + 1,
+            max_movieid + 1,
+            k_factors,
+            time_factors,
+            reg_strength
+        ).to(device)
+    
+    return model
+
 def main():
     # 加载保存的模型
     logging.basicConfig(level=logging.INFO)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    checkpoint = load_checkpoint(data_path + 'model_checkpoint.pt')
     
-    # model = CFModel(
-    #     checkpoint['max_userid'] + 1,
-    #     checkpoint['max_movieid'] + 1,
-    #     checkpoint['k_factors'],
-    #     checkpoint.get('time_factors', 10)  # 向后兼容
-    # ).to(device)
-    model = TimeAwareCFModel(
-        checkpoint['max_userid'] + 1,
-        checkpoint['max_movieid'] + 1,
-        checkpoint['k_factors'],
-        checkpoint.get('time_factors', 10)  # 向后兼容
-    ).to(device)
+    model = Models[2] # 更改这个测试不同模型 ["CF", "TimeAwareCF", "SimplifiedTimeAwareCF"]
+
+    checkpoint = load_checkpoint(data_path + 'model_checkpoint_' + model + '.pt')
+    
+    # 根据checkpoint动态创建模型
+    model = create_model_from_checkpoint(checkpoint, device)
     model.load_state_dict(checkpoint['best_model_state'])
+    
+    logging.info(f"Loaded model type: {checkpoint.get('model_type', 'Unknown')}")
+    logging.info(f"Model parameters: k_factors={checkpoint['k_factors']}, time_factors={checkpoint.get('time_factors', 10)}")
+    
+    # 如果有训练历史，显示训练信息
+    if 'train_losses' in checkpoint and 'val_losses' in checkpoint:
+        train_losses = checkpoint['train_losses']
+        val_losses = checkpoint['val_losses']
+        final_train_loss = train_losses[-1] if train_losses else 'N/A'
+        final_val_loss = val_losses[-1] if val_losses else 'N/A'
+        best_val_loss = min(val_losses) if val_losses else 'N/A'
+        
+        logging.info(f"\n=== Training History ===")
+        logging.info(f"Final training loss: {final_train_loss}")
+        logging.info(f"Final validation loss: {final_val_loss}")
+        logging.info(f"Best validation loss: {best_val_loss}")
+        logging.info(f"Training epochs completed: {len(train_losses)}")
     
     # 加载测试数据
     test_data = load_test_data(
@@ -174,28 +232,38 @@ def main():
         checkpoint['data_split_path']
     )
     
+    logging.info(f"Loaded test data with {len(test_data)} samples")
+    
     # 评估模型
     metrics = evaluate_model(model, test_data, device)
+    logging.info(f"\n=== Model Performance ===")
+    logging.info(f"Test MSE: {metrics['MSE']:.4f}")
     logging.info(f"Test RMSE: {metrics['RMSE']:.4f}")
     logging.info(f"Test MAE: {metrics['MAE']:.4f}")
     
     # 示例：分析用户1在不同时间的推荐差异
-    ratings, users, movies = load_data(data_path + 'ratings.csv',
-                                     data_path + 'users.csv',
-                                     data_path + 'movies.csv')
+    try:
+        ratings, users, movies = load_data(data_path + 'ratings.csv',
+                                        data_path + 'users.csv',
+                                        data_path + 'movies.csv')
+        
+        user_id = 1
+        logging.info(f"\n用户 {user_id} 在工作日白天的推荐:")
+        workday_recs = get_user_recommendations(model, user_id, ratings, movies, device, 
+                                            target_daytime=1, target_weekend=0, n_recommendations=5)
+        for movie_id, title, score in workday_recs:
+            logging.info(f"  {title}: {score:.3f}")
+        
+        logging.info(f"\n用户 {user_id} 在周末晚上的推荐:")
+        weekend_recs = get_user_recommendations(model, user_id, ratings, movies, device,
+                                            target_daytime=2, target_weekend=1, n_recommendations=5)
+        for movie_id, title, score in weekend_recs:
+            logging.info(f"  {title}: {score:.3f}")
+    except Exception as e:
+        logging.error(f"生成推荐时出错: {str(e)}")
     
-    user_id = 1
-    logging.info(f"\n用户 {user_id} 在工作日白天的推荐:")
-    workday_recs = get_user_recommendations(model, user_id, ratings, movies, device, 
-                                          target_daytime=1, target_weekend=0, n_recommendations=5)
-    for movie_id, title, score in workday_recs:
-        logging.info(f"  {title}: {score:.3f}")
-    
-    logging.info(f"\n用户 {user_id} 在周末晚上的推荐:")
-    weekend_recs = get_user_recommendations(model, user_id, ratings, movies, device,
-                                          target_daytime=2, target_weekend=1, n_recommendations=5)
-    for movie_id, title, score in weekend_recs:
-        logging.info(f"  {title}: {score:.3f}")
+    # 返回评估结果
+    return metrics, model
 
 if __name__ == "__main__":
     main()

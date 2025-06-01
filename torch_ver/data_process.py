@@ -153,3 +153,37 @@ def load_test_data(ratings_path, split_path):
     if 'year' not in test_data.columns:
         test_data['year'] = test_data['timestamp'].apply(get_year_category)
     return test_data
+
+def load_existing_split_data(split_path):
+    """加载已存在的分割数据"""
+    try:
+        train_data = pd.read_csv(f'{split_path}/train.csv', sep='\t')
+        val_data = pd.read_csv(f'{split_path}/val.csv', sep='\t')
+        test_data = pd.read_csv(f'{split_path}/test.csv', sep='\t')
+        
+        # 确保包含必要的时间特征列
+        for data, name in [(train_data, 'train'), (val_data, 'val'), (test_data, 'test')]:
+            if 'daytime' not in data.columns or 'is_weekend' not in data.columns or 'year' not in data.columns:
+                logging.warning(f"{name} data missing time features, will recreate split")
+                return None, None, None
+        
+        logging.info(f'Loaded existing split data from {split_path}')
+        return train_data, val_data, test_data
+    except Exception as e:
+        logging.info(f'Failed to load existing split data: {str(e)}')
+        return None, None, None
+
+def check_split_data_exists(split_path):
+    """检查分割数据是否存在且完整"""
+    required_files = ['train.csv', 'val.csv', 'test.csv']
+    split_dir = Path(split_path)
+    
+    if not split_dir.exists():
+        return False
+    
+    for file in required_files:
+        file_path = split_dir / file
+        if not file_path.exists() or file_path.stat().st_size == 0:
+            return False
+    
+    return True
