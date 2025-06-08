@@ -168,12 +168,12 @@ def main():
     
     # 优化的配置参数 - 针对学习率调度器调整
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    K_FACTORS = 60           # 稍微减少因子数以配合调度器
-    TIME_FACTORS = 16        # 调整时间因子数
-    BATCH_SIZE = 512         # 增大批次大小
-    LEARNING_RATE = 0.001    # 标准学习率（调度器会自动调整）
-    NUM_EPOCHS = 30          # 增加轮数以利用调度器
-    REG_STRENGTH = 0.001     # L2正则化强度
+    K_FACTORS = 80
+    TIME_FACTORS = 16
+    BATCH_SIZE = 256
+    LEARNING_RATE = 0.001
+    NUM_EPOCHS = 30
+    REG_STRENGTH = 0.001
     
     logging.info(f'使用设备: {DEVICE}')
     logging.info(f'配置参数: K_FACTORS={K_FACTORS}, TIME_FACTORS={TIME_FACTORS}, BATCH_SIZE={BATCH_SIZE}')

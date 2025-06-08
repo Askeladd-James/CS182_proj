@@ -1,68 +1,54 @@
 """
 完整的模型训练、评估和比较流程（包括baseline）
 """
-import subprocess
-import sys
 import logging
 import time
 from pathlib import Path
 from data_process import data_path
 
 def setup_logging():
-    """设置日志"""
+    """设置日志 - 每次运行时清空日志文件"""
     log_file = Path(data_path) / 'full_comparison_log.txt'
+    
+    # 每次运行时删除旧的日志文件
+    if log_file.exists():
+        log_file.unlink()
+        print(f"🗑️  已清空旧日志文件: {log_file}")
+    
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
+            logging.FileHandler(log_file, encoding='utf-8', mode='w'),  # 使用 'w' 模式确保覆盖
             logging.StreamHandler()
-        ]
+        ],
+        force=True  # 强制重新配置logging
     )
-    return logging.getLogger(__name__)
-
-def run_baseline_training():
-    """运行baseline模型训练"""
+    
+    # 记录日志开始
     logger = logging.getLogger(__name__)
-    logger.info("开始训练Baseline模型...")
+    logger.info("=" * 80)
+    logger.info("🆕 新的完整模型比较流程开始")
+    logger.info("=" * 80)
+    
+    return logger
+
+def run_all_model_training():
+    """运行所有模型训练（包括baseline和时间感知模型）"""
+    logger = logging.getLogger(__name__)
+    logger.info("开始训练所有模型...")
     
     try:
-        # 添加origin目录到路径
-        origin_path = Path(__file__).parent.parent / 'origin'
-        if str(origin_path) not in sys.path:
-            sys.path.insert(0, str(origin_path))
-        
-        # 导入并运行baseline训练
-        import train as baseline_train
-        
-        # 运行baseline训练
-        model, test_data, results = baseline_train.main()
-        logger.info("✅ Baseline模型训练完成!")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Baseline训练过程中出错: {str(e)}")
-        logger.error(f"错误详情: {type(e).__name__}")
-        return False
-    finally:
-        # 清理路径
-        if str(origin_path) in sys.path:
-            sys.path.remove(str(origin_path))
-
-def run_time_aware_training():
-    """运行时间感知模型训练"""
-    logger = logging.getLogger(__name__)
-    logger.info("开始训练时间感知模型...")
-    
-    try:
-        # 运行时间感知模型训练
+        # 运行所有模型训练（包括baseline、时间感知模型、MMOE）
         import train_comparison
         results = train_comparison.main()
-        logger.info("✅ 时间感知模型训练完成!")
-        return True
+        logger.info("✅ 所有模型训练完成!")
+        return True, results
     except Exception as e:
-        logger.error(f"❌ 时间感知模型训练过程中出错: {str(e)}")
-        return False
+        logger.error(f"❌ 模型训练过程中出错: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return False, None
 
 def run_analysis():
     """运行模型分析"""
@@ -77,6 +63,8 @@ def run_analysis():
         return analyzer, summary
     except Exception as e:
         logger.error(f"❌ 分析过程中出错: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None, None
 
 def check_data_availability():
@@ -105,7 +93,7 @@ def check_data_availability():
     logger.info("✅ 所有必要的数据文件都存在")
     return True
 
-def print_progress_summary(baseline_success, time_aware_success, analysis_success):
+def print_progress_summary(training_success, analysis_success):
     """打印进度总结"""
     logger = logging.getLogger(__name__)
     
@@ -114,8 +102,7 @@ def print_progress_summary(baseline_success, time_aware_success, analysis_succes
     logger.info("=" * 80)
     
     steps = [
-        ("Baseline模型训练", baseline_success),
-        ("时间感知模型训练", time_aware_success), 
+        ("所有模型训练", training_success),
         ("模型分析和比较", analysis_success)
     ]
     
@@ -138,11 +125,11 @@ def print_progress_summary(baseline_success, time_aware_success, analysis_succes
     return success_count == total_steps
 
 def main():
-    """主流程 - 包含baseline和时间感知模型的完整训练流程"""
+    """主流程 - 训练所有模型并进行分析"""
     start_time = time.time()
     logger = setup_logging()
     
-    logger.info("🚀 开始完整的模型比较流程（包括Baseline）...")
+    logger.info("🚀 开始完整的模型比较流程...")
     logger.info(f"📁 工作目录: {data_path}")
     
     # 检查数据可用性
@@ -157,43 +144,37 @@ def main():
         dir_path.mkdir(exist_ok=True)
         logger.info(f"📂 确保目录存在: {dir_path}")
     
-    # 初始化结果追踪
-    baseline_success = False
-    time_aware_success = False
+    # 阶段1：训练所有模型（Baseline + 时间感知模型 + MMOE）
+    logger.info("\n" + "=" * 80)
+    logger.info("🔄 阶段1：训练所有模型")
+    logger.info("=" * 80)
+    logger.info("包括：Baseline、时间感知模型（UserTime、IndependentTime、UMTime）、MMOE")
+    
+    training_start = time.time()
+    training_success, training_results = run_all_model_training()
+    training_time = time.time() - training_start
+    
+    if training_success:
+        logger.info(f"✅ 所有模型训练完成，耗时: {training_time:.2f}秒")
+        
+        # 显示训练结果概览
+        if training_results:
+            logger.info("\n📊 训练结果概览:")
+            for model_type, results in training_results.items():
+                test_metrics = results.get('test_metrics', {})
+                rmse = test_metrics.get('RMSE', 'N/A')
+                mae = test_metrics.get('MAE', 'N/A')
+                logger.info(f"  {results.get('model_name', model_type)}:")
+                logger.info(f"    RMSE: {rmse}")
+                logger.info(f"    MAE: {mae}")
+    else:
+        logger.error("❌ 模型训练失败")
+    
+    # 阶段2：模型分析和比较（只有在训练成功时才执行）
     analysis_success = False
-    
-    # 阶段1：训练Baseline模型
-    logger.info("\n" + "=" * 80)
-    logger.info("🔄 阶段1：训练Baseline模型")
-    logger.info("=" * 80)
-    
-    baseline_start = time.time()
-    baseline_success = run_baseline_training()
-    baseline_time = time.time() - baseline_start
-    
-    if baseline_success:
-        logger.info(f"✅ Baseline训练完成，耗时: {baseline_time:.2f}秒")
-    else:
-        logger.warning("⚠️  Baseline训练失败，但继续执行其他模型")
-    
-    # 阶段2：训练时间感知模型（包括MMOE）
-    logger.info("\n" + "=" * 80)
-    logger.info("🔄 阶段2：训练时间感知模型（包括MMOE）")
-    logger.info("=" * 80)
-    
-    time_aware_start = time.time()
-    time_aware_success = run_time_aware_training()
-    time_aware_time = time.time() - time_aware_start
-    
-    if time_aware_success:
-        logger.info(f"✅ 时间感知模型训练完成，耗时: {time_aware_time:.2f}秒")
-    else:
-        logger.error("❌ 时间感知模型训练失败")
-    
-    # 阶段3：模型分析和比较（只有在至少有一个模型训练成功时才执行）
-    if baseline_success or time_aware_success:
+    if training_success:
         logger.info("\n" + "=" * 80)
-        logger.info("🔄 阶段3：模型分析和比较")
+        logger.info("🔄 阶段2：模型分析和比较")
         logger.info("=" * 80)
         
         analysis_start = time.time()
@@ -206,7 +187,7 @@ def main():
         else:
             logger.error("❌ 模型分析失败")
     else:
-        logger.error("❌ 没有成功训练的模型，跳过分析阶段")
+        logger.error("❌ 训练失败，跳过分析阶段")
         analyzer, summary = None, None
     
     # 总结
@@ -217,14 +198,12 @@ def main():
     logger.info("=" * 80)
     
     # 打印详细的总结
-    all_success = print_progress_summary(baseline_success, time_aware_success, analysis_success)
+    all_success = print_progress_summary(training_success, analysis_success)
     
     logger.info(f"\n⏱️  总执行时间: {total_time:.2f}秒")
     
-    if baseline_success:
-        logger.info(f"   - Baseline训练: {baseline_time:.2f}秒")
-    if time_aware_success:
-        logger.info(f"   - 时间感知模型训练: {time_aware_time:.2f}秒")
+    if training_success:
+        logger.info(f"   - 模型训练: {training_time:.2f}秒")
     if analysis_success:
         logger.info(f"   - 模型分析: {analysis_time:.2f}秒")
     
@@ -236,7 +215,7 @@ def main():
         logger.info(f"📈 分析图表: {data_path}analysis_plots/")
         logger.info(f"📝 日志文件: {data_path}full_comparison_log.txt")
         
-        # 如果有具体的汇总文件，也记录一下
+        # 检查汇总文件
         summary_files = [
             'all_models_summary_with_baseline.json',
             'all_models_summary_with_scheduler.json'
@@ -252,3 +231,16 @@ def main():
 
 if __name__ == "__main__":
     analyzer, summary = main()
+    
+    # 如果运行成功，提供简单的交互提示
+    if analyzer is not None:
+        print("\n" + "="*60)
+        print("🎉 所有模型训练和分析完成！")
+        print("="*60)
+        print("主要输出文件:")
+        print(f"• 模型性能汇总: {data_path}results/all_models_summary_with_baseline.json")
+        print(f"• 性能对比图表: {data_path}analysis_plots/")
+        print(f"• 训练日志: {data_path}full_comparison_log.txt")
+        print("="*60)
+    else:
+        print("\n❌ 流程执行失败，请检查日志文件获取详细信息")

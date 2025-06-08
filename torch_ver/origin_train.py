@@ -224,12 +224,12 @@ def main():
     # 配置参数 - 更接近TensorFlow版本，与其他模型保持一致
     config = {
         'DEVICE': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        'K_FACTORS': 100,  # baseline使用更多因子
+        'K_FACTORS': 100,
         'BATCH_SIZE': 256,
-        'LEARNING_RATE': 0.001,
+        'LEARNING_RATE': 0.0005,
         'NUM_EPOCHS': 30,
-        'REG_STRENGTH': 0.0001,  # baseline使用较低正则化
-        'PATIENCE': 10
+        'REG_STRENGTH': 0.001,  # baseline使用较低正则化
+        'PATIENCE': 5
     }
     
     logging.info(f'使用设备: {config["DEVICE"]}')
