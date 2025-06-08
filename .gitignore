@@ -1,3 +1,6 @@
 .vscode
 data/split_data
 data/*.pt
+data/model/*.pt
+temp
+**/*.md

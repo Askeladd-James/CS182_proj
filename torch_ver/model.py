@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from MMOE import TwoStageMMoEModel
 
-Models = ["CF", "TimeAwareCF", "SimplifiedTimeAwareCF"]
+Models = ["IndependentTime", "UserTime", "UMTime", "TwoStage_MMoE"]
 
-class SimplifiedTimeAwareCFModel(nn.Module):
+class IndependentTimeModel(nn.Module):
     """简化的时间感知协同过滤模型 - 更稳定的版本"""
     def __init__(self, n_users, m_items, k_factors=100, time_factors=20, reg_strength=0.01):
-        super(SimplifiedTimeAwareCFModel, self).__init__()
+        super(IndependentTimeModel, self).__init__()
         self.name = Models[2]
         self.reg_strength = reg_strength
         
@@ -104,187 +105,10 @@ class SimplifiedTimeAwareCFModel(nn.Module):
                    torch.norm(self.year_embedding.weight))
         return self.reg_strength * (user_reg + item_reg + time_reg * 0.1)
 
-# 优化后的TimeAwareCFModel
-class TimeAwareCFModel(nn.Module):
-    def __init__(self, n_users, m_items, k_factors, time_factors=10, reg_strength=0.01):
-        super(TimeAwareCFModel, self).__init__()
-        self.reg_strength = reg_strength  # 添加正则化强度
-        self.name = Models[1]
-        self.k_factors = k_factors  # 保存k_factors
-        self.time_factors = time_factors  # 保存time_factors
-        
-        # 基础嵌入 - 使用更保守的维度
-        self.user_base_embedding = nn.Embedding(n_users, k_factors)
-        self.item_embedding = nn.Embedding(m_items, k_factors)
-        
-        # 关键改进1：添加偏差项（原模型缺少）
-        self.user_bias = nn.Embedding(n_users, 1)
-        self.item_bias = nn.Embedding(m_items, 1)
-        self.global_bias = nn.Parameter(torch.zeros(1))
-        
-        # 关键改进2：简化LSTM，减少过拟合风险
-        # 修复：移除单层LSTM的dropout警告，改为多层或移除dropout
-        self.user_evolution = nn.LSTM(k_factors, k_factors//2, num_layers=2, 
-                                    batch_first=True, dropout=0.3)
-        
-        # 时间特征
-        self.daytime_embedding = nn.Embedding(3, time_factors)
-        self.weekend_embedding = nn.Embedding(2, time_factors)
-        
-        # 关键改进3：添加更多时间偏差项
-        self.daytime_bias = nn.Embedding(3, 1)
-        self.weekend_bias = nn.Embedding(2, 1)
-        
-        # 电影年代效应 - 不同年代电影的基础受欢迎程度
-        self.movie_year_bias = nn.Embedding(20, 1)
-        
-        # 关键改进4：修复FC层维度并增强正则化
-        # combined的实际维度是: k_factors//2 + 2 * time_factors
-        combined_dim = k_factors//2 + 2 * time_factors
-        self.fc = nn.Sequential(
-            nn.Linear(combined_dim, combined_dim // 2),  # 修复维度计算
-            nn.ReLU(),
-            nn.Dropout(0.4),  # 增强dropout
-            nn.Linear(combined_dim // 2, 1)
-        )
-        
-        # 关键改进5：添加主要dropout层
-        self.dropout = nn.Dropout(0.3)
-        
-        # 权重初始化
-        self._init_weights()
-    
-    def _init_weights(self):
-        """改进的权重初始化 - 使用更小的初始化值"""
-        # 主要嵌入层使用较小的标准差
-        nn.init.normal_(self.user_base_embedding.weight, std=0.05)
-        nn.init.normal_(self.item_embedding.weight, std=0.05)
-        
-        # 偏差项初始化为小值
-        nn.init.normal_(self.user_bias.weight, std=0.01)
-        nn.init.normal_(self.item_bias.weight, std=0.01)
-        
-        # 时间特征嵌入
-        nn.init.normal_(self.daytime_embedding.weight, std=0.01)
-        nn.init.normal_(self.weekend_embedding.weight, std=0.01)
-        
-        # 时间偏差项
-        nn.init.normal_(self.daytime_bias.weight, std=0.01)
-        nn.init.normal_(self.weekend_bias.weight, std=0.01)
-        nn.init.normal_(self.movie_year_bias.weight, std=0.01)
-        
-        # LSTM权重初始化
-        for name, param in self.user_evolution.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_normal_(param)
-            elif 'bias' in name:
-                nn.init.constant_(param, 0)
-    
-    def forward(self, user_input, item_input, daytime_input, weekend_input, 
-                year_input, user_historical_features=None):
-        """
-        user_historical_features: 用户历史行为的时序特征（可选）
-        """
-        # 获取用户基础嵌入
-        user_base = self.user_base_embedding(user_input)
-        
-        # 应用dropout到基础嵌入
-        if self.training:
-            user_base = self.dropout(user_base)
-        
-        # 关键改进6：改进LSTM使用方式
-        if user_historical_features is not None:
-            # 确保历史特征维度正确
-            if user_historical_features.dim() == 2:
-                user_historical_features = user_historical_features.unsqueeze(1)
-            
-            # 通过LSTM建模用户偏好演化
-            user_evolved, _ = self.user_evolution(user_historical_features)
-            user_embedded = user_evolved[:, -1, :]  # 取最后一个时间步
-        else:
-            # 如果没有历史特征，使用基础嵌入的简化版本
-            user_embedded = user_base[:, :self.k_factors//2]  # 使用保存的k_factors
-        
-        # 物品嵌入
-        item_embedded = self.item_embedding(item_input)
-        if self.training:
-            item_embedded = self.dropout(item_embedded)
-        
-        # 关键改进7：使用点积作为基础交互（类似SimplifiedTimeAwareCFModel）
-        # 需要确保维度匹配
-        if user_embedded.size(1) != item_embedded.size(1):
-            # 通过线性层调整用户嵌入维度
-            if not hasattr(self, 'user_projection'):
-                self.user_projection = nn.Linear(user_embedded.size(1), item_embedded.size(1)).to(user_embedded.device)
-            user_embedded = self.user_projection(user_embedded)
-        
-        base_interaction = torch.sum(user_embedded * item_embedded, dim=1)
-        
-        # 添加基础偏差项
-        user_bias = self.user_bias(user_input).squeeze()
-        item_bias = self.item_bias(item_input).squeeze()
-        
-        # 时间特征
-        daytime_embedded = self.daytime_embedding(daytime_input)
-        weekend_embedded = self.weekend_embedding(weekend_input)
-        
-        # 时间偏差项
-        daytime_bias = self.daytime_bias(daytime_input).squeeze()
-        weekend_bias = self.weekend_bias(weekend_input).squeeze()
-        
-        # 电影年代偏置
-        movie_year_bias = self.movie_year_bias(year_input).squeeze()
-        
-        # 关键改进8：分离时间特征处理，避免与用户-物品交互混合
-        time_features = torch.cat([daytime_embedded, weekend_embedded], dim=1)
-        
-        # 融合用户演化特征和时间特征
-        # 确保user_embedded维度正确
-        if user_embedded.size(1) != self.k_factors//2:
-            # 如果维度不匹配，调整到正确维度
-            if not hasattr(self, 'user_resize'):
-                self.user_resize = nn.Linear(user_embedded.size(1), self.k_factors//2).to(user_embedded.device)
-            user_embedded = self.user_resize(user_embedded)
-        
-        combined = torch.cat([user_embedded, time_features], dim=1)
-        
-        # 通过FC层学习复杂交互
-        time_interaction = self.fc(combined).squeeze()
-        
-        # 关键改进9：最终预测使用加法模式（类似其他优化模型）
-        final_rating = (base_interaction + user_bias + item_bias + 
-                       daytime_bias + weekend_bias + movie_year_bias + 
-                       time_interaction + self.global_bias)
-        
-        return final_rating
-    
-    def get_regularization_loss(self):
-        """计算L2正则化损失"""
-        user_reg = torch.norm(self.user_base_embedding.weight)
-        item_reg = torch.norm(self.item_embedding.weight)
-        time_reg = (torch.norm(self.daytime_embedding.weight) + 
-                   torch.norm(self.weekend_embedding.weight))
-        lstm_reg = sum(torch.norm(param) for param in self.user_evolution.parameters())
-        
-        return self.reg_strength * (user_reg + item_reg + time_reg * 0.1 + lstm_reg * 0.05)
-    
-    def rate(self, user_id, item_id, daytime=1, weekend=0, year=10):
-        """预测单个用户对单个物品的评分（兼容接口）"""
-        self.eval()
-        with torch.no_grad():
-            user_tensor = torch.LongTensor([user_id])
-            item_tensor = torch.LongTensor([item_id])
-            daytime_tensor = torch.LongTensor([daytime])
-            weekend_tensor = torch.LongTensor([weekend])
-            year_tensor = torch.LongTensor([year])
-            prediction = self.forward(user_tensor, item_tensor, daytime_tensor, 
-                                    weekend_tensor, year_tensor)
-            return prediction.item()
-
 # 回来改个名字，这三个都是和时间相关的
-class CFModel(nn.Module):
+class UserTimeModel(nn.Module):
     def __init__(self, n_users, m_items, k_factors, time_factors=10, reg_strength=0.01):
-        super(CFModel, self).__init__()
+        super(UserTimeModel, self).__init__()
         self.reg_strength = reg_strength  # 添加正则化强度参数
         self.name = Models[0]
         
@@ -400,6 +224,190 @@ class CFModel(nn.Module):
         time_reg = (torch.norm(self.daytime_embedding.weight) + 
                    torch.norm(self.weekend_embedding.weight) + 
                    torch.norm(self.year_embedding.weight))
+        return self.reg_strength * (user_reg + item_reg + time_reg * 0.1)
+    
+    def rate(self, user_id, item_id, daytime=1, weekend=0, year=10):
+        """预测单个用户对单个物品的评分（兼容接口）"""
+        self.eval()
+        with torch.no_grad():
+            user_tensor = torch.LongTensor([user_id])
+            item_tensor = torch.LongTensor([item_id])
+            daytime_tensor = torch.LongTensor([daytime])
+            weekend_tensor = torch.LongTensor([weekend])
+            year_tensor = torch.LongTensor([year])
+            prediction = self.forward(user_tensor, item_tensor, daytime_tensor, 
+                                    weekend_tensor, year_tensor)
+            return prediction.item()
+
+class UMTimeModel(nn.Module):
+    def __init__(self, n_users, m_items, k_factors, time_factors=10, reg_strength=0.01):
+        super(UMTimeModel, self).__init__()
+        self.reg_strength = reg_strength  # 添加正则化强度
+        self.name = Models[1]
+        self.k_factors = k_factors  # 保存k_factors
+        self.time_factors = time_factors  # 保存time_factors
+        
+        # 基础嵌入 - 使用更保守的维度
+        self.user_base_embedding = nn.Embedding(n_users, k_factors)
+        self.item_embedding = nn.Embedding(m_items, k_factors)
+        
+        # 关键改进1：添加偏差项（原模型缺少）
+        self.user_bias = nn.Embedding(n_users, 1)
+        self.item_bias = nn.Embedding(m_items, 1)
+        self.global_bias = nn.Parameter(torch.zeros(1))
+        
+        # 关键改进2：简化LSTM，减少过拟合风险
+        # 修复：移除单层LSTM的dropout警告，改为多层或移除dropout
+        # self.user_evolution = nn.LSTM(k_factors, k_factors//2, num_layers=2, 
+        #                             batch_first=True, dropout=0.3)
+        
+        # 时间特征
+        self.daytime_embedding = nn.Embedding(3, time_factors)
+        self.weekend_embedding = nn.Embedding(2, time_factors)
+        
+        # 关键改进3：添加更多时间偏差项
+        self.daytime_bias = nn.Embedding(3, 1)
+        self.weekend_bias = nn.Embedding(2, 1)
+        
+        # 电影年代效应 - 不同年代电影的基础受欢迎程度
+        self.movie_year_bias = nn.Embedding(20, 1)
+        
+        self.user_projection = nn.Linear(k_factors//2, k_factors)  # 用户嵌入维度投影
+        self.user_resize = nn.Linear(k_factors, k_factors//2)   # 用户嵌入维度调整
+        
+        # 关键改进4：修复FC层维度并增强正则化
+        # combined的实际维度是: k_factors//2 + 2 * time_factors
+        combined_dim = k_factors//2 + 2 * time_factors
+        self.fc = nn.Sequential(
+            nn.Linear(combined_dim, combined_dim // 2),  # 修复维度计算
+            nn.ReLU(),
+            nn.Dropout(0.4),  # 增强dropout
+            nn.Linear(combined_dim // 2, 1)
+        )
+        
+        # 关键改进5：添加主要dropout层
+        self.dropout = nn.Dropout(0.3)
+        
+        # 权重初始化
+        self._init_weights()
+    
+    def _init_weights(self):
+        """改进的权重初始化 - 使用更小的初始化值"""
+        # 主要嵌入层使用较小的标准差
+        nn.init.normal_(self.user_base_embedding.weight, std=0.05)
+        nn.init.normal_(self.item_embedding.weight, std=0.05)
+        
+        # 偏差项初始化为小值
+        nn.init.normal_(self.user_bias.weight, std=0.01)
+        nn.init.normal_(self.item_bias.weight, std=0.01)
+        
+        # 时间特征嵌入
+        nn.init.normal_(self.daytime_embedding.weight, std=0.01)
+        nn.init.normal_(self.weekend_embedding.weight, std=0.01)
+        
+        # 时间偏差项
+        nn.init.normal_(self.daytime_bias.weight, std=0.01)
+        nn.init.normal_(self.weekend_bias.weight, std=0.01)
+        nn.init.normal_(self.movie_year_bias.weight, std=0.01)
+        
+        nn.init.xavier_normal_(self.user_projection.weight)
+        nn.init.constant_(self.user_projection.bias, 0)
+        nn.init.xavier_normal_(self.user_resize.weight)
+        nn.init.constant_(self.user_resize.bias, 0)
+        
+        # LSTM权重初始化
+        # for name, param in self.user_evolution.named_parameters():
+        #     if 'weight' in name:
+        #         nn.init.xavier_normal_(param)
+        #     elif 'bias' in name:
+        #         nn.init.constant_(param, 0)
+    
+    def forward(self, user_input, item_input, daytime_input, weekend_input, 
+                year_input, user_historical_features=None):
+        """
+        user_historical_features: 用户历史行为的时序特征（可选）
+        """
+        # 获取用户基础嵌入
+        user_base = self.user_base_embedding(user_input)
+        
+        # 应用dropout到基础嵌入
+        if self.training:
+            user_base = self.dropout(user_base)
+        
+        # 关键改进6：改进LSTM使用方式
+        # if user_historical_features is not None:
+        #     # 确保历史特征维度正确
+        #     if user_historical_features.dim() == 2:
+        #         user_historical_features = user_historical_features.unsqueeze(1)
+            
+        #     # 通过LSTM建模用户偏好演化
+        #     user_evolved, _ = self.user_evolution(user_historical_features)
+        #     user_embedded = user_evolved[:, -1, :]  # 取最后一个时间步
+        # else:
+            # 如果没有历史特征，使用基础嵌入的简化版本
+        user_embedded = user_base[:, :self.k_factors//2]  # 使用保存的k_factors
+        
+        # 物品嵌入
+        item_embedded = self.item_embedding(item_input)
+        if self.training:
+            item_embedded = self.dropout(item_embedded)
+        
+        # 关键改进7：使用点积作为基础交互（类似IndependentTimeModel）
+        # 需要确保维度匹配
+        if user_embedded.size(1) != item_embedded.size(1):
+            # 通过线性层调整用户嵌入维度
+            # if not hasattr(self, 'user_projection'):
+            #     self.user_projection = nn.Linear(user_embedded.size(1), item_embedded.size(1)).to(user_embedded.device)
+            user_embedded = self.user_projection(user_embedded)
+        
+        base_interaction = torch.sum(user_embedded * item_embedded, dim=1)
+        
+        # 添加基础偏差项
+        user_bias = self.user_bias(user_input).squeeze()
+        item_bias = self.item_bias(item_input).squeeze()
+        
+        # 时间特征
+        daytime_embedded = self.daytime_embedding(daytime_input)
+        weekend_embedded = self.weekend_embedding(weekend_input)
+        
+        # 时间偏差项
+        daytime_bias = self.daytime_bias(daytime_input).squeeze()
+        weekend_bias = self.weekend_bias(weekend_input).squeeze()
+        
+        # 电影年代偏置
+        movie_year_bias = self.movie_year_bias(year_input).squeeze()
+        
+        # 关键改进8：分离时间特征处理，避免与用户-物品交互混合
+        time_features = torch.cat([daytime_embedded, weekend_embedded], dim=1)
+        
+        # 融合用户演化特征和时间特征
+        # 确保user_embedded维度正确
+        if user_embedded.size(1) != self.k_factors//2:
+            # 如果维度不匹配，调整到正确维度
+            # if not hasattr(self, 'user_resize'):
+            #     self.user_resize = nn.Linear(user_embedded.size(1), self.k_factors//2).to(user_embedded.device)
+            user_embedded = self.user_resize(user_embedded)
+        
+        combined = torch.cat([user_embedded, time_features], dim=1)
+        
+        # 通过FC层学习复杂交互
+        time_interaction = self.fc(combined).squeeze()
+        
+        # 关键改进9：最终预测使用加法模式（类似其他优化模型）
+        final_rating = (base_interaction + user_bias + item_bias + 
+                       daytime_bias + weekend_bias + movie_year_bias + 
+                       time_interaction + self.global_bias)
+        
+        return final_rating
+    
+    def get_regularization_loss(self):
+        """计算L2正则化损失"""
+        user_reg = torch.norm(self.user_base_embedding.weight)
+        item_reg = torch.norm(self.item_embedding.weight)
+        time_reg = (torch.norm(self.daytime_embedding.weight) + 
+                   torch.norm(self.weekend_embedding.weight))
+        # lstm_reg = sum(torch.norm(param) for param in self.user_evolution.parameters())
+        
         return self.reg_strength * (user_reg + item_reg + time_reg * 0.1)
     
     def rate(self, user_id, item_id, daytime=1, weekend=0, year=10):

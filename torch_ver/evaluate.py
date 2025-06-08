@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error
 import logging
 from data_process import load_data, load_test_data, MovieLensDataset, data_path
-from model import CFModel, TimeAwareCFModel, SimplifiedTimeAwareCFModel, Models
+from model import IndependentTimeModel, UserTimeModel, UMTimeModel, Models
 
 def evaluate_model(model, test_data, device):
     """评估模型性能"""
@@ -149,7 +149,7 @@ def load_checkpoint(path):
 
 def create_model_from_checkpoint(checkpoint, device):
     """根据checkpoint中的model_type创建正确的模型"""
-    model_type = checkpoint.get('model_type', 'SimplifiedTimeAwareCFModel')  # 默认值
+    model_type = checkpoint.get('model_type', "IndependentTime")  # 默认值
     
     max_userid = checkpoint['max_userid']
     max_movieid = checkpoint['max_movieid']
@@ -159,24 +159,24 @@ def create_model_from_checkpoint(checkpoint, device):
     
     logging.info(f"Creating model of type: {model_type}")
     
-    if model_type == 'CFModel':
-        model = CFModel(
+    if model_type == 'UserTime':
+        model = UserTimeModel(
             max_userid + 1,
             max_movieid + 1,
             k_factors,
             time_factors,
             reg_strength
         ).to(device)
-    elif model_type == 'TimeAwareCFModel':
-        model = TimeAwareCFModel(
+    elif model_type == 'UMTime':
+        model = UMTimeModel(
             max_userid + 1,
             max_movieid + 1,
             k_factors,
             time_factors,
             reg_strength
         ).to(device)
-    elif model_type == 'SimplifiedTimeAwareCFModel':
-        model = SimplifiedTimeAwareCFModel(
+    elif model_type == 'IndependentTime':
+        model = IndependentTimeModel(
             max_userid + 1,
             max_movieid + 1,
             k_factors,
@@ -185,8 +185,8 @@ def create_model_from_checkpoint(checkpoint, device):
         ).to(device)
     else:
         # 如果model_type不存在或不匹配，使用默认模型
-        logging.warning(f"Unknown model_type: {model_type}, using SimplifiedTimeAwareCFModel as default")
-        model = SimplifiedTimeAwareCFModel(
+        logging.warning(f"Unknown model_type: {model_type}, using IndependentTimeModel as default")
+        model = IndependentTimeModel(
             max_userid + 1,
             max_movieid + 1,
             k_factors,
@@ -201,9 +201,9 @@ def main():
     logging.basicConfig(level=logging.INFO)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    model = Models[2] # 更改这个测试不同模型 ["CF", "TimeAwareCF", "SimplifiedTimeAwareCF"]
+    model = Models[1] # 更改这个测试不同模型 ["CF", "TimeAwareCF", "SimplifiedTimeAwareCF"]
 
-    checkpoint = load_checkpoint(data_path + 'model_checkpoint_' + model + '.pt')
+    checkpoint = load_checkpoint(data_path + 'model/' + 'model_checkpoint_' + model + '.pt')
     
     # 根据checkpoint动态创建模型
     model = create_model_from_checkpoint(checkpoint, device)

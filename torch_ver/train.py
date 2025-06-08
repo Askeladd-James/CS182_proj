@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from data_process import load_data, create_time_aware_split, save_split_data, check_split_data_exists, load_existing_split_data, MovieLensDataset, data_path
-from model import SimplifiedTimeAwareCFModel, TimeAwareCFModel, CFModel
+from model import IndependentTimeModel, UserTimeModel, UMTimeModel
 from torch.utils.data import DataLoader
 import logging
 import math
@@ -207,13 +207,13 @@ def main():
     ###################   选择模型   #######################
     
     # 使用简化的模型
-    model = SimplifiedTimeAwareCFModel(
-        max_userid + 1, max_movieid + 1, K_FACTORS, TIME_FACTORS, REG_STRENGTH
-    ).to(DEVICE)
-    # model = CFModel(
+    # model = IndependentTimeModel(
     #     max_userid + 1, max_movieid + 1, K_FACTORS, TIME_FACTORS, REG_STRENGTH
     # ).to(DEVICE)
-    # model = TimeAwareCFModel(
+    model = UserTimeModel(
+        max_userid + 1, max_movieid + 1, K_FACTORS, TIME_FACTORS, REG_STRENGTH
+    ).to(DEVICE)
+    # model = UMTimeModel(
     #     max_userid + 1, max_movieid + 1, K_FACTORS, TIME_FACTORS, REG_STRENGTH
     # ).to(DEVICE)
     
