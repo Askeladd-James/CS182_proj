@@ -10,7 +10,7 @@ class IndependentTimeModel(nn.Module):
     """简化的时间感知协同过滤模型 - 更稳定的版本"""
     def __init__(self, n_users, m_items, k_factors=100, time_factors=20, reg_strength=0.01):
         super(IndependentTimeModel, self).__init__()
-        self.name = Models[2]
+        self.name = Models[0]
         self.reg_strength = reg_strength
         
         # 基础嵌入层 - 降低维度防止过拟合
@@ -111,7 +111,7 @@ class UserTimeModel(nn.Module):
     def __init__(self, n_users, m_items, k_factors, time_factors=10, reg_strength=0.01):
         super(UserTimeModel, self).__init__()
         self.reg_strength = reg_strength  # 添加正则化强度参数
-        self.name = Models[0]
+        self.name = Models[1]
         
         # 基础嵌入层 - 降低维度防止过拟合
         self.user_embedding = nn.Embedding(n_users, k_factors)
@@ -244,7 +244,7 @@ class UMTimeModel(nn.Module):
     def __init__(self, n_users, m_items, k_factors, time_factors=20, reg_strength=0.01):
         super(UMTimeModel, self).__init__()
         self.reg_strength = reg_strength
-        self.name = Models[1]
+        self.name = Models[2]
         self.k_factors = k_factors
         self.time_factors = time_factors
         
@@ -357,7 +357,7 @@ class UMTimeModel(nn.Module):
         combined_features = torch.cat([user_embedded, time_features], dim=1)
         time_interaction = self.time_fusion(combined_features).squeeze()
         
-        # 🔧 修复11: 最终预测 - 参考UserTimeModel的成功模式
+        # 🔧 修复11: 最终预测 - 参考UserTimeModel
         final_rating = (base_interaction + user_bias + item_bias + 
                        daytime_bias + weekend_bias + year_bias + 
                        user_daytime_bias + time_interaction + self.global_bias)

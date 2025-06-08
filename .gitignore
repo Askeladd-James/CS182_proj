@@ -4,3 +4,4 @@ data/*.pt
 data/model/*.pt
 temp
 **/*.md
+data/analysis_plots

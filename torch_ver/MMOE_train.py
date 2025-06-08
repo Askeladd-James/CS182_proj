@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
 from data_process import (load_data, create_time_aware_split, save_split_data, 
                          check_split_data_exists, load_existing_split_data, 
                          MovieLensDataset, data_path)
@@ -233,7 +233,7 @@ def create_cached_fusion_dataloader(model, data, user_history_stats, batch_size,
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 def train_stage(model, train_loader, val_loader, criterion, optimizer, device, 
-                         num_epochs, stage_name, patience=8, scheduler=None, stage_num=1):
+                         num_epochs, stage_name, patience=5, scheduler=None, stage_num=1):
     """优化的训练阶段函数"""
     best_loss = float('inf')
     best_model_state = None
@@ -472,8 +472,8 @@ def evaluate_stage(model, val_loader, criterion, device):
     return total_loss / num_batches
 
 def train_mmoe(model, train_data, val_data, device, batch_size=256, 
-                        num_epochs_per_stage=[30, 30, 30], learning_rates=[0.0005, 0.001, 0.0005]):
-    """优化的MMoE训练函数"""
+                        num_epochs_per_stage=[40, 40, 20], learning_rates=[0.001, 0.001, 0.0005]):
+    """优化的MMoE训练函数 - 调整参数以提升性能"""
     
     # 准备用户历史统计特征
     print("准备用户历史统计特征...")
@@ -483,80 +483,78 @@ def train_mmoe(model, train_data, val_data, device, batch_size=256,
     criterion = nn.MSELoss()
     all_training_history = {}
     
-    # 阶段1：时序建模 - 使用更小的学习率和余弦退火
+    # 阶段1：时序建模 - 使用更大的学习率
     print("=" * 50)
-    print("阶段1：时序建模 (优化版)")
+    print("阶段1：时序建模 (改进版)")
     print("=" * 50)
     
     model.set_training_stage(1)
     temporal_loader = create_temporal_dataloader(train_data, user_history_stats, batch_size)
     temporal_val_loader = create_temporal_dataloader(val_data, val_user_history_stats, batch_size, shuffle=False)
     
-    # 使用AdamW + 余弦退火重启
-    optimizer1 = torch.optim.AdamW(
+    # 🔧 改进1: 使用Adam + ReduceLROnPlateau替代余弦退火
+    optimizer1 = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()), 
         lr=learning_rates[0], 
-        weight_decay=1e-5,
-        betas=(0.9, 0.999),
-        eps=1e-8
+        weight_decay=1e-6,  # 减少weight decay
+        betas=(0.9, 0.999)
     )
     
-    # 余弦退火重启调度器
-    scheduler1 = CosineAnnealingWarmRestarts(
+    scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer1, 
-        T_0=10,  # 每10个epoch重启
-        T_mult=2,  # 重启周期倍增
-        eta_min=1e-7  # 最小学习率
+        mode='min', 
+        factor=0.7, 
+        patience=8, 
+        min_lr=1e-6
     )
     
-    best_temporal_loss, temporal_history = train_stage_optimized(
+    best_temporal_loss, temporal_history = train_stage(
         model, temporal_loader, temporal_val_loader, criterion, optimizer1, 
-        device, num_epochs_per_stage[0], "Temporal", patience=12, scheduler=scheduler1, stage_num=1
+        device, num_epochs_per_stage[0], "Temporal", patience=8, scheduler=scheduler1, stage_num=1
     )
     all_training_history['temporal'] = temporal_history
     
     print(f"阶段1完成 - 最终学习率: {optimizer1.param_groups[0]['lr']:.6f}")
     print(f"时序建模最佳损失: {best_temporal_loss:.4f}")
     
-    # 阶段2：CF建模 - 使用标准学习率调度
+    # 阶段2：CF建模 - 重点改进
     print("=" * 50)
-    print("阶段2：协同过滤建模 (优化版)")
+    print("阶段2：协同过滤建模 (完全对齐UMTimeModel)")
     print("=" * 50)
     
     model.set_training_stage(2)
     cf_loader = create_standard_dataloader(train_data, batch_size)
     val_loader = create_standard_dataloader(val_data, batch_size, shuffle=False)
     
-    # CF阶段使用稍高的学习率
-    optimizer2 = torch.optim.AdamW(
+    # 🔧 修复12: 使用与UMTimeModel完全相同的优化器配置
+    optimizer2 = torch.optim.AdamW(  # 改用AdamW，与train.py中UMTimeModel一致
         filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=learning_rates[1], 
-        weight_decay=1e-5,
+        lr=learning_rates[1],  # 0.002
+        weight_decay=1e-5,  # 与UMTimeModel完全一致
         betas=(0.9, 0.999)
     )
     
-    # 使用ReduceLROnPlateau
-    scheduler2 = ReduceLROnPlateau(
+    # 🔧 修复13: 使用与UMTimeModel相同的学习率调度器配置
+    scheduler2 = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer2, 
         mode='min', 
-        factor=0.7, 
-        patience=6, 
-        min_lr=1e-6,
-        verbose=True
+        factor=0.6,  # 与train.py中UMTimeModel一致
+        patience=5,  # 与train.py中UMTimeModel一致
+        min_lr=1e-6
     )
     
-    best_cf_loss, cf_history = train_stage_optimized(
+    best_cf_loss, cf_history = train_stage(
         model, cf_loader, val_loader, criterion, optimizer2, 
-        device, num_epochs_per_stage[1], "CF", patience=12, scheduler=scheduler2, stage_num=2
+        device, num_epochs_per_stage[1], "CF", patience=10, scheduler=scheduler2, stage_num=2
     )
     all_training_history['cf'] = cf_history
     
     print(f"阶段2完成 - 最终学习率: {optimizer2.param_groups[0]['lr']:.6f}")
     print(f"CF建模最佳损失: {best_cf_loss:.4f}")
     
-    # 阶段3：MMoE融合 - 使用最小学习率精细调优
+    # 阶段3：MMoE融合 - 缩短训练时间，专注融合
     print("=" * 50)
-    print("阶段3：MMoE融合 (优化版)")
+    print("阶段3：MMoE融合 (改进版)")
     print("=" * 50)
     
     model.set_training_stage(3)
@@ -582,24 +580,25 @@ def train_mmoe(model, train_data, val_data, device, batch_size=256,
         shuffle=False, cache_file=val_cache_file
     )
     
-    # MMoE阶段使用更小的学习率
-    optimizer3 = torch.optim.AdamW(
+    # 🔧 改进3: MMoE阶段使用适中的学习率
+    optimizer3 = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()), 
         lr=learning_rates[2], 
-        weight_decay=1e-6,  # 更小的权重衰减
+        weight_decay=1e-8,  # 最小的weight decay
         betas=(0.9, 0.999)
     )
     
-    # 使用余弦退火
-    scheduler3 = CosineAnnealingLR(
+    scheduler3 = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer3, 
-        T_max=num_epochs_per_stage[2], 
-        eta_min=1e-7
+        mode='min', 
+        factor=0.8, 
+        patience=5, 
+        min_lr=1e-8
     )
     
     best_mmoe_loss, mmoe_history = train_stage(
         model, fusion_loader, fusion_val_loader, criterion, optimizer3, 
-        device, num_epochs_per_stage[2], "MMoE", patience=15, scheduler=scheduler3, stage_num=3
+        device, num_epochs_per_stage[2], "MMoE", patience=10, scheduler=scheduler3, stage_num=3
     )
     all_training_history['mmoe'] = mmoe_history
     
@@ -646,8 +645,8 @@ def main():
     # 配置参数调整以适配改进模型
     config = {
         'DEVICE': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        'K_FACTORS': 60,  # 保持与UMTimeModel一致
-        'TIME_FACTORS': 20,
+        'K_FACTORS': 100,  # 保持与UMTimeModel一致
+        'TIME_FACTORS': 40,
         'BATCH_SIZE': 256,
         'NUM_EPOCHS_PER_STAGE': [30, 30, 30],  # CF阶段轮数适配改进层
         'LEARNING_RATES': [0.0005, 0.001, 0.001],
