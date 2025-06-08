@@ -169,7 +169,7 @@ def main():
     # 优化的配置参数 - 针对学习率调度器调整
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     K_FACTORS = 80
-    TIME_FACTORS = 16
+    TIME_FACTORS = 20
     BATCH_SIZE = 256
     LEARNING_RATE = 0.001
     NUM_EPOCHS = 30

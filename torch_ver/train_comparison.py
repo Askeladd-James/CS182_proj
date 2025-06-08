@@ -561,7 +561,7 @@ def train_and_evaluate_mmoe_model(
     return results
 
 def evaluate_mmoe_model(model, test_data, device):
-    """专门为MMOE模型的评估函数"""
+    """专门为MMOE模型的评估函数 - 修复维度错误"""
     model.eval()
     predictions = []
     actuals = []
@@ -594,21 +594,19 @@ def evaluate_mmoe_model(model, test_data, device):
                     torch.FloatTensor([3.0, 1.0, 1.0, 3.0, 0.0]).unsqueeze(0).to(device)
                 )
 
-            # 获取各阶段预测
-            model.set_training_stage(1)
-            temporal_pred = model(
-                user_id, movie_id, daytime, weekend, year, history_features
-            )
-
-            model.set_training_stage(2)
-            cf_pred = model(user_id, movie_id, daytime, weekend, year)
-
-            model.set_training_stage(3)
+            # 使用阶段4进行完整评估
+            model.set_training_stage(4)
             final_pred = model(
-                user_id, movie_id, daytime, weekend, year, temporal_pred, cf_pred
+                user_id, movie_id, daytime, weekend, year, user_history_features=history_features
             )
 
-            predictions.append(final_pred.cpu().item())
+            # 确保预测值是标量
+            if final_pred.dim() > 0:
+                final_pred = final_pred.item()
+            else:
+                final_pred = final_pred.item()
+
+            predictions.append(final_pred)
             actuals.append(row["rating"])
 
     inference_time = time.time() - start_time

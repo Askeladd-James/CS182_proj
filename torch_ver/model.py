@@ -259,8 +259,8 @@ class UMTimeModel(nn.Module):
         
         # 关键改进2：简化LSTM，减少过拟合风险
         # 修复：移除单层LSTM的dropout警告，改为多层或移除dropout
-        # self.user_evolution = nn.LSTM(k_factors, k_factors//2, num_layers=2, 
-        #                             batch_first=True, dropout=0.3)
+        self.user_evolution = nn.LSTM(k_factors, k_factors//2, num_layers=2, 
+                                    batch_first=True, dropout=0.3)
         
         # 时间特征
         self.daytime_embedding = nn.Embedding(3, time_factors)
@@ -317,17 +317,14 @@ class UMTimeModel(nn.Module):
         nn.init.constant_(self.user_resize.bias, 0)
         
         # LSTM权重初始化
-        # for name, param in self.user_evolution.named_parameters():
-        #     if 'weight' in name:
-        #         nn.init.xavier_normal_(param)
-        #     elif 'bias' in name:
-        #         nn.init.constant_(param, 0)
+        for name, param in self.user_evolution.named_parameters():
+            if 'weight' in name:
+                nn.init.xavier_normal_(param)
+            elif 'bias' in name:
+                nn.init.constant_(param, 0)
     
     def forward(self, user_input, item_input, daytime_input, weekend_input, 
                 year_input, user_historical_features=None):
-        """
-        user_historical_features: 用户历史行为的时序特征（可选）
-        """
         # 获取用户基础嵌入
         user_base = self.user_base_embedding(user_input)
         
@@ -407,9 +404,9 @@ class UMTimeModel(nn.Module):
         item_reg = torch.norm(self.item_embedding.weight)
         time_reg = (torch.norm(self.daytime_embedding.weight) + 
                    torch.norm(self.weekend_embedding.weight))
-        # lstm_reg = sum(torch.norm(param) for param in self.user_evolution.parameters())
+        lstm_reg = sum(torch.norm(param) for param in self.user_evolution.parameters())
         
-        return self.reg_strength * (user_reg + item_reg + time_reg * 0.1)
+        return self.reg_strength * (user_reg + item_reg + time_reg * 0.1 + lstm_reg * 0.05)
     
     def rate(self, user_id, item_id, daytime=1, weekend=0, year=10):
         """预测单个用户对单个物品的评分（兼容接口）"""
