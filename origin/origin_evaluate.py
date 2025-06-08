@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error
 import logging
 from data_process import load_data, split_data, load_test_data, MovieLensDataset, data_path
-from model import CFModel
+from origin_model import CFModel
 
 def evaluate_model(model, test_data, device):
     """评估模型性能"""

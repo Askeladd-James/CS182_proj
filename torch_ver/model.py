@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 from MMOE import TwoStageMMoEModel
+from origin_model import CFModel
 
-Models = ["IndependentTime", "UserTime", "UMTime", "TwoStage_MMoE"]
+Models = ["IndependentTime", "UserTime", "UMTime", "TwoStage_MMoE", "CF"]
 
 class IndependentTimeModel(nn.Module):
     """简化的时间感知协同过滤模型 - 更稳定的版本"""

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingLR
 from data_process import (load_data, create_time_aware_split, save_split_data, 
                          check_split_data_exists, load_existing_split_data, 
                          MovieLensDataset, data_path)
@@ -143,17 +144,88 @@ def get_predictions_for_data(model, data, user_history_stats, device, stage):
     
     return predictions
 
-def create_fusion_dataloader(model, data, user_history_stats, batch_size, device, shuffle=True):
-    """创建融合数据加载器"""
-    # 获取时序和CF预测
-    temporal_predictions = get_predictions_for_data(model, data, user_history_stats, device, stage=1)
-    cf_predictions = get_predictions_for_data(model, data, user_history_stats, device, stage=2)
+def get_predictions_for_data_batch(model, data, user_history_stats, device, stage, batch_size=1024):
+    """批量获取预测结果 - 优化版本"""
+    model.eval()
+    model.set_training_stage(stage)
+    
+    predictions = []
+    
+    # 创建数据加载器进行批处理
+    if stage == 1:
+        # 时序预测需要用户历史特征
+        dataset = OptimizedTemporalDataset(data, user_history_stats)
+    else:
+        # CF预测使用标准数据集
+        dataset = MovieLensDataset(
+            data['user_emb_id'].values,
+            data['movie_emb_id'].values,
+            data['rating'].values,  # 这里的rating不会被使用，只是为了保持接口一致
+            data['daytime'].values,
+            data['is_weekend'].values,
+            data['year'].values
+        )
+    
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            if stage == 1:
+                # 时序预测
+                users, items, _, daytime, weekend, years, history_features = batch
+                users = users.squeeze().to(device)
+                items = items.squeeze().to(device)
+                daytime = daytime.squeeze().to(device)
+                weekend = weekend.squeeze().to(device)
+                years = years.squeeze().to(device)
+                history_features = history_features.to(device)
+                
+                batch_preds = model(users, items, daytime, weekend, years, history_features)
+            else:
+                # CF预测
+                users, items, _, daytime, weekend, years = batch
+                users = users.squeeze().to(device)
+                items = items.squeeze().to(device)
+                daytime = daytime.squeeze().to(device)
+                weekend = weekend.squeeze().to(device)
+                years = years.squeeze().to(device)
+                
+                batch_preds = model(users, items, daytime, weekend, years)
+            
+            # 处理单个值和批量值的情况
+            if batch_preds.dim() == 0:
+                predictions.append(batch_preds.item())
+            else:
+                predictions.extend(batch_preds.cpu().numpy().tolist())
+    
+    return predictions
+
+def create_cached_fusion_dataloader(model, data, user_history_stats, batch_size, device, shuffle=True, cache_file=None):
+    """创建带缓存的融合数据加载器"""
+    
+    if cache_file and Path(cache_file).exists():
+        print(f"  从缓存加载预测结果: {cache_file}")
+        cache_data = torch.load(cache_file)
+        temporal_predictions = cache_data['temporal_predictions']
+        cf_predictions = cache_data['cf_predictions']
+    else:
+        print("  生成并缓存预测结果...")
+        temporal_predictions = get_predictions_for_data_batch(model, data, user_history_stats, device, stage=1, batch_size=2048)
+        cf_predictions = get_predictions_for_data_batch(model, data, user_history_stats, device, stage=2, batch_size=2048)
+        
+        if cache_file:
+            cache_data = {
+                'temporal_predictions': temporal_predictions,
+                'cf_predictions': cf_predictions
+            }
+            torch.save(cache_data, cache_file)
+            print(f"  预测结果已缓存至: {cache_file}")
     
     dataset = FusionDataset(data, temporal_predictions, cf_predictions)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
-def train_stage(model, train_loader, val_loader, criterion, optimizer, device, num_epochs, stage_name, patience=5):
-    """训练单个阶段 - 改进版本，包含早停机制"""
+def train_stage(model, train_loader, val_loader, criterion, optimizer, device, num_epochs, stage_name, patience=5, scheduler=None):
+    """训练单个阶段 - 修复所有阶段的batch解包问题"""
     best_loss = float('inf')
     best_model_state = None
     patience_counter = 0
@@ -161,6 +233,7 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
     # 记录训练历史
     train_losses = []
     val_losses = []
+    learning_rates = []
     
     for epoch in range(num_epochs):
         # 训练阶段
@@ -172,7 +245,7 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
             optimizer.zero_grad()
             
             if model.training_stage == 1:
-                # 时序训练
+                # 时序训练 - 需要7个元素（包括history_features）
                 users, items, ratings, daytime, weekend, years, history_features = batch
                 users = users.squeeze().to(device)
                 items = items.squeeze().to(device)
@@ -184,9 +257,10 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
                 
                 predictions = model(users, items, daytime, weekend, years, history_features)
                 targets = ratings
+                
             elif model.training_stage == 2:
-                # CF训练
-                users, items, ratings, daytime, weekend, years = batch
+                # CF训练 - 使用*extra_features处理可能的变长参数
+                users, items, ratings, daytime, weekend, years, *extra_features = batch
                 users = users.squeeze().to(device)
                 items = items.squeeze().to(device)
                 ratings = ratings.squeeze().to(device)
@@ -196,19 +270,27 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
                 
                 predictions = model(users, items, daytime, weekend, years)
                 targets = ratings
+                
             elif model.training_stage == 3:
-                # MMoE训练
-                users, items, ratings, daytime, weekend, years, temporal_preds, cf_preds = batch
+                # MMoE训练 - 使用*extra_features处理可变数量的元素
+                users, items, ratings, daytime, weekend, years, *extra_features = batch
                 users = users.squeeze().to(device)
                 items = items.squeeze().to(device)
                 ratings = ratings.squeeze().to(device)
                 daytime = daytime.squeeze().to(device)
                 weekend = weekend.squeeze().to(device)
                 years = years.squeeze().to(device)
-                temporal_preds = temporal_preds.squeeze().to(device)
-                cf_preds = cf_preds.squeeze().to(device)
                 
-                predictions = model(users, items, daytime, weekend, years, temporal_preds, cf_preds)
+                if len(extra_features) == 2:
+                    # FusionDataset - 有temporal_preds和cf_preds
+                    temporal_preds, cf_preds = extra_features
+                    temporal_preds = temporal_preds.squeeze().to(device)
+                    cf_preds = cf_preds.squeeze().to(device)
+                    predictions = model(users, items, daytime, weekend, years, temporal_preds, cf_preds)
+                else:
+                    # 标准数据集 - 没有额外特征
+                    predictions = model(users, items, daytime, weekend, years)
+                
                 targets = ratings
             
             loss = criterion(predictions, targets)
@@ -225,12 +307,29 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
         avg_train_loss = total_loss / num_batches
         train_losses.append(avg_train_loss)
         
+        # 记录当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+        learning_rates.append(current_lr)
+        
         # 验证阶段
         if val_loader is not None:
             val_loss = evaluate_stage(model, val_loader, criterion, device)
             val_losses.append(val_loss)
             
-            print(f"{stage_name} Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"{stage_name} Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {current_lr:.6f}")
+            
+            # 更新学习率调度器
+            old_lr = current_lr
+            if scheduler is not None:
+                if isinstance(scheduler, ReduceLROnPlateau):
+                    scheduler.step(val_loss)
+                else:
+                    scheduler.step()
+                
+                # 检查学习率是否改变
+                new_lr = optimizer.param_groups[0]['lr']
+                if new_lr != old_lr:
+                    print(f"  → 学习率调整: {old_lr:.6f} → {new_lr:.6f}")
             
             # 早停检查
             if val_loss < best_loss:
@@ -247,7 +346,21 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
                 print(f"  → 早停：验证损失连续 {patience} 轮未改善")
                 break
         else:
-            print(f"{stage_name} Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}")
+            print(f"{stage_name} Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, LR: {current_lr:.6f}")
+            
+            # 对于没有验证集的情况，基于训练损失更新调度器
+            old_lr = current_lr
+            if scheduler is not None:
+                if isinstance(scheduler, ReduceLROnPlateau):
+                    scheduler.step(avg_train_loss)
+                else:
+                    scheduler.step()
+                    
+                # 检查学习率是否改变
+                new_lr = optimizer.param_groups[0]['lr']
+                if new_lr != old_lr:
+                    print(f"  → 学习率调整: {old_lr:.6f} → {new_lr:.6f}")
+                    
             if avg_train_loss < best_loss:
                 best_loss = avg_train_loss
                 best_model_state = model.state_dict().copy()
@@ -261,6 +374,7 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
     training_history = {
         'train_losses': train_losses,
         'val_losses': val_losses if val_loader is not None else [],
+        'learning_rates': learning_rates,
         'best_loss': best_loss,
         'total_epochs': epoch + 1
     }
@@ -268,7 +382,7 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, device, n
     return best_loss, training_history
 
 def evaluate_stage(model, val_loader, criterion, device):
-    """评估阶段性能"""
+    """评估阶段性能 - 修复所有阶段的batch解包问题"""
     model.eval()
     total_loss = 0
     num_batches = 0
@@ -276,6 +390,7 @@ def evaluate_stage(model, val_loader, criterion, device):
     with torch.no_grad():
         for batch in val_loader:
             if model.training_stage == 1:
+                # 时序验证 - 7个元素
                 users, items, ratings, daytime, weekend, years, history_features = batch
                 users = users.squeeze().to(device)
                 items = items.squeeze().to(device)
@@ -287,8 +402,10 @@ def evaluate_stage(model, val_loader, criterion, device):
                 
                 predictions = model(users, items, daytime, weekend, years, history_features)
                 targets = ratings
+                
             elif model.training_stage == 2:
-                users, items, ratings, daytime, weekend, years = batch
+                # CF验证 - 使用*extra_features处理可能的变长参数
+                users, items, ratings, daytime, weekend, years, *extra_features = batch
                 users = users.squeeze().to(device)
                 items = items.squeeze().to(device)
                 ratings = ratings.squeeze().to(device)
@@ -298,18 +415,27 @@ def evaluate_stage(model, val_loader, criterion, device):
                 
                 predictions = model(users, items, daytime, weekend, years)
                 targets = ratings
+                
             elif model.training_stage == 3:
-                users, items, ratings, daytime, weekend, years, temporal_preds, cf_preds = batch
+                # MMoE验证 - 使用*extra_features处理可变数量的元素
+                users, items, ratings, daytime, weekend, years, *extra_features = batch
                 users = users.squeeze().to(device)
                 items = items.squeeze().to(device)
                 ratings = ratings.squeeze().to(device)
                 daytime = daytime.squeeze().to(device)
                 weekend = weekend.squeeze().to(device)
                 years = years.squeeze().to(device)
-                temporal_preds = temporal_preds.squeeze().to(device)
-                cf_preds = cf_preds.squeeze().to(device)
                 
-                predictions = model(users, items, daytime, weekend, years, temporal_preds, cf_preds)
+                if len(extra_features) == 2:
+                    # FusionDataset - 有temporal_preds和cf_preds
+                    temporal_preds, cf_preds = extra_features
+                    temporal_preds = temporal_preds.squeeze().to(device)
+                    cf_preds = cf_preds.squeeze().to(device)
+                    predictions = model(users, items, daytime, weekend, years, temporal_preds, cf_preds)
+                else:
+                    # 标准数据集 - 没有额外特征
+                    predictions = model(users, items, daytime, weekend, years)
+                
                 targets = ratings
             
             loss = criterion(predictions, targets)
@@ -318,9 +444,9 @@ def evaluate_stage(model, val_loader, criterion, device):
     
     return total_loss / num_batches
 
-def train_optimized_mmoe(model, train_data, val_data, device, batch_size=256, 
-                        num_epochs_per_stage=[5, 8, 5], learning_rates=[0.001, 0.001, 0.0005]):
-    """训练优化的MMoE模型"""
+def train_mmoe(model, train_data, val_data, device, batch_size=256, 
+               num_epochs_per_stage=[8, 12, 8], learning_rates=[0.001, 0.001, 0.0005]):
+    """训练MMoE模型 - 直接适配改进的CF层，不改变函数签名"""
     
     # 准备用户历史统计特征
     print("准备用户历史统计特征...")
@@ -328,29 +454,31 @@ def train_optimized_mmoe(model, train_data, val_data, device, batch_size=256,
     val_user_history_stats = prepare_user_history_stats(val_data)
     
     criterion = nn.MSELoss()
-    
-    # 存储所有阶段的训练历史
     all_training_history = {}
     
-    # 阶段1：时序建模
+    # 阶段1：时序建模（适配改进模型，增加轮数）
     print("=" * 50)
-    print("阶段1：时序建模（基于统计特征）")
+    print("阶段1：时序建模")
     print("=" * 50)
     
     model.set_training_stage(1)
     temporal_loader = create_temporal_dataloader(train_data, user_history_stats, batch_size)
     temporal_val_loader = create_temporal_dataloader(val_data, val_user_history_stats, batch_size, shuffle=False)
     
+    # 调整优化器参数以适配改进模型
     optimizer1 = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
-                                  lr=learning_rates[0])
+                                  lr=learning_rates[0], weight_decay=1e-5)
+    scheduler1 = ReduceLROnPlateau(optimizer1, mode='min', factor=0.6, patience=4, min_lr=1e-6)
     
     best_temporal_loss, temporal_history = train_stage(
         model, temporal_loader, temporal_val_loader, criterion, optimizer1, 
-        device, num_epochs_per_stage[0], "Temporal", patience=3
+        device, num_epochs_per_stage[0], "Temporal", patience=8, scheduler=scheduler1
     )
     all_training_history['temporal'] = temporal_history
     
-    # 阶段2：CF建模
+    print(f"阶段1完成 - 最终学习率: {optimizer1.param_groups[0]['lr']:.6f}")
+    
+    # 阶段2：CF建模（适配UMTimeModel风格的CF层，增加轮数）
     print("=" * 50)
     print("阶段2：协同过滤建模")
     print("=" * 50)
@@ -359,61 +487,98 @@ def train_optimized_mmoe(model, train_data, val_data, device, batch_size=256,
     cf_loader = create_standard_dataloader(train_data, batch_size)
     val_loader = create_standard_dataloader(val_data, batch_size, shuffle=False)
     
+    # CF阶段使用更细致的学习率调度
     optimizer2 = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
-                                  lr=learning_rates[1])
+                                  lr=learning_rates[1], weight_decay=1e-5)
+    scheduler2 = ReduceLROnPlateau(optimizer2, mode='min', factor=0.6, patience=5, min_lr=1e-6)
     
     best_cf_loss, cf_history = train_stage(
         model, cf_loader, val_loader, criterion, optimizer2, 
-        device, num_epochs_per_stage[1], "CF", patience=5
+        device, num_epochs_per_stage[1], "CF", patience=10, scheduler=scheduler2
     )
     all_training_history['cf'] = cf_history
     
-    # 阶段3：MMoE融合
+    print(f"阶段2完成 - 最终学习率: {optimizer2.param_groups[0]['lr']:.6f}")
+    
+    # 阶段3：MMoE融合（清除缓存以使用新CF预测）
     print("=" * 50)
     print("阶段3：MMoE融合")
     print("=" * 50)
     
     model.set_training_stage(3)
-    fusion_loader = create_fusion_dataloader(model, train_data, user_history_stats, batch_size, device)
-    fusion_val_loader = create_fusion_dataloader(model, val_data, val_user_history_stats, batch_size, device, shuffle=False)
+    
+    # 清除旧缓存文件以使用新的CF预测
+    train_cache_file = data_path + 'cache_train_predictions.pt'
+    val_cache_file = data_path + 'cache_val_predictions.pt'
+    
+    for cache_file in [train_cache_file, val_cache_file]:
+        if Path(cache_file).exists():
+            Path(cache_file).unlink()
+    
+    print("准备融合训练数据...")
+    fusion_loader = create_cached_fusion_dataloader(
+        model, train_data, user_history_stats, batch_size * 2, device, 
+        cache_file=train_cache_file
+    )
+    
+    print("准备融合验证数据...")
+    fusion_val_loader = create_cached_fusion_dataloader(
+        model, val_data, val_user_history_stats, batch_size * 2, device, 
+        shuffle=False, cache_file=val_cache_file
+    )
     
     optimizer3 = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
-                                  lr=learning_rates[2])
+                                  lr=learning_rates[2], weight_decay=1e-5)
+    scheduler3 = ReduceLROnPlateau(optimizer3, mode='min', factor=0.6, patience=5, min_lr=1e-7)
     
     best_mmoe_loss, mmoe_history = train_stage(
         model, fusion_loader, fusion_val_loader, criterion, optimizer3, 
-        device, num_epochs_per_stage[2], "MMoE", patience=3
+        device, num_epochs_per_stage[2], "MMoE", patience=10, scheduler=scheduler3
     )
     all_training_history['mmoe'] = mmoe_history
     
+    print(f"阶段3完成 - 最终学习率: {optimizer3.param_groups[0]['lr']:.6f}")
+    
+    # 性能分析（保持原有格式）
     print("=" * 50)
-    print("训练完成!")
-    print(f"最佳时序损失: {best_temporal_loss:.4f} (轮数: {temporal_history['total_epochs']})")
-    print(f"最佳CF损失: {best_cf_loss:.4f} (轮数: {cf_history['total_epochs']})")
-    print(f"最佳MMoE损失: {best_mmoe_loss:.4f} (轮数: {mmoe_history['total_epochs']})")
+    print("训练完成! 结果分析:")
+    print("=" * 50)
+    print(f"时序损失: {best_temporal_loss:.4f} (轮数: {temporal_history['total_epochs']})")
+    print(f"CF损失: {best_cf_loss:.4f} (轮数: {cf_history['total_epochs']})")
+    print(f"MMoE融合损失: {best_mmoe_loss:.4f} (轮数: {mmoe_history['total_epochs']})")
+    
+    better_base = min(best_temporal_loss, best_cf_loss)
+    if best_mmoe_loss < better_base:
+        improvement = ((better_base - best_mmoe_loss) / better_base * 100)
+        print(f"✅ MMoE相对最好单模型提升: {improvement:.2f}%")
+    else:
+        degradation = ((best_mmoe_loss - better_base) / better_base * 100)
+        print(f"❌ MMoE相对最好单模型下降: {degradation:.2f}%")
+    
     print("=" * 50)
     
     return model, all_training_history
 
 def main():
-    """主函数"""
+    """主函数 - 保持原有结构，适配改进模型"""
     logging.basicConfig(level=logging.INFO)
     
-    # 配置
+    # 配置参数调整以适配改进模型
     config = {
         'DEVICE': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        'K_FACTORS': 60,
-        'TIME_FACTORS': 16,
-        'BATCH_SIZE': 512,
-        'NUM_EPOCHS_PER_STAGE': [20, 20, 10],  # 适当增加轮数，因为有早停
-        'LEARNING_RATES': [0.002, 0.001, 0.0005],
+        'K_FACTORS': 60,  # 保持与UMTimeModel一致
+        'TIME_FACTORS': 20,
+        'BATCH_SIZE': 256,
+        'NUM_EPOCHS_PER_STAGE': [1, 1, 1],  # CF阶段轮数适配改进层
+        'LEARNING_RATES': [0.001, 0.001, 0.001],
         'REG_STRENGTH': 0.001,
-        'NUM_EXPERTS': 3
+        'NUM_EXPERTS': 4
     }
     
     print(f'使用设备: {config["DEVICE"]}')
+    print(f'MMOE模型配置: {config}')
     
-    # 加载数据
+    # 数据加载（保持不变）
     split_path = data_path + 'split_data'
     
     if check_split_data_exists(split_path):
@@ -431,28 +596,28 @@ def main():
     
     print(f'数据分割 - 训练: {len(train_data)}, 验证: {len(val_data)}, 测试: {len(test_data)}')
     
-    # 获取最大ID
     max_userid = train_data['user_emb_id'].max()
     max_movieid = train_data['movie_emb_id'].max()
     
-    # 创建优化的模型
+    # 创建模型（现在使用改进的MMOE，但保持原有接口）
     model = TwoStageMMoEModel(
         max_userid + 1, max_movieid + 1,
         config['K_FACTORS'], config['TIME_FACTORS'],
         config['REG_STRENGTH'], config['NUM_EXPERTS']
     ).to(config['DEVICE'])
     
-    print(f"模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"MMOE模型参数数量: {total_params:,}")
     
-    # 训练模型
-    model, training_history = train_optimized_mmoe(
+    # 训练模型（保持原有接口）
+    model, training_history = train_mmoe(
         model, train_data, val_data, config['DEVICE'],
         batch_size=config['BATCH_SIZE'],
         num_epochs_per_stage=config['NUM_EPOCHS_PER_STAGE'],
         learning_rates=config['LEARNING_RATES']
     )
     
-    # 保存模型和训练历史
+    # 保存模型（保持原有格式，但包含改进信息）
     checkpoint = {
         'max_userid': max_userid,
         'max_movieid': max_movieid,
@@ -463,8 +628,9 @@ def main():
         'best_model_state': model.state_dict(),
         'model_type': model.name,
         'data_split_path': split_path,
-        'training_history': training_history,  # 添加训练历史
-        'config': config
+        'training_history': training_history,
+        'config': config,
+        'has_scheduler': True
     }
     
     model_path = data_path + f'model/model_checkpoint_{model.name}.pt'
@@ -475,506 +641,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# import torch
-# import torch.nn as nn
-# import torch.optim as optim
-# from data_process import (load_data, create_time_aware_split, save_split_data, 
-#                          check_split_data_exists, load_existing_split_data, 
-#                          MovieLensDataset, data_path)
-# from MMOE import TwoStageMMoEModel
-# from torch.utils.data import DataLoader, Dataset
-# import logging
-# import math
-# import pandas as pd
-# from pathlib import Path
-# import numpy as np
-
-# class SequentialTrainingDataset(Dataset):
-#     """时序训练数据集"""
-#     def __init__(self, sequential_data, model):
-#         self.sequential_data = sequential_data
-#         self.model = model
-    
-#     def __len__(self):
-#         return len(self.sequential_data)
-    
-#     def __getitem__(self, idx):
-#         item = self.sequential_data[idx]
-#         sequence = item['sequence']
-#         target_rating = item['target_rating']
-        
-#         # 构建序列的原始ID特征
-#         raw_features = []
-#         for _, row in sequence.iterrows():
-#             feature_vector = [
-#                 int(row['user_emb_id']),
-#                 int(row['daytime']), 
-#                 int(row['is_weekend']),
-#                 int(row['year']),
-#                 float(row['rating'])
-#             ]
-#             raw_features.append(feature_vector)
-        
-#         # 转换为tensor，padding到固定长度
-#         max_seq_len = 20
-#         if len(raw_features) > max_seq_len:
-#             raw_features = raw_features[-max_seq_len:]
-#         else:
-#             # 用零填充
-#             while len(raw_features) < max_seq_len:
-#                 raw_features.insert(0, [0, 0, 0, 0, 0.0])
-        
-#         # 转换为tensor
-#         sequence_tensor = torch.LongTensor([[int(f[0]), int(f[1]), int(f[2]), int(f[3])] for f in raw_features])  # IDs
-#         ratings_tensor = torch.FloatTensor([f[4] for f in raw_features])  # 评分
-#         target_tensor = torch.FloatTensor([target_rating])
-        
-#         return sequence_tensor, ratings_tensor, target_tensor
-
-# class FusionTrainingDataset(Dataset):
-#     """融合训练数据集"""
-#     def __init__(self, data, lstm_predictions, cf_predictions):
-#         self.data = data.reset_index(drop=True)
-#         self.lstm_predictions = lstm_predictions
-#         self.cf_predictions = cf_predictions
-    
-#     def __len__(self):
-#         return len(self.data)
-    
-#     def __getitem__(self, idx):
-#         row = self.data.iloc[idx]
-#         return (
-#             torch.LongTensor([row['user_emb_id']]),
-#             torch.LongTensor([row['movie_emb_id']]),
-#             torch.FloatTensor([row['rating']]),
-#             torch.LongTensor([row['daytime']]),
-#             torch.LongTensor([row['is_weekend']]),
-#             torch.LongTensor([row['year']]),
-#             torch.FloatTensor([self.lstm_predictions[idx]]),
-#             torch.FloatTensor([self.cf_predictions[idx]])
-#         )
-
-# def sequential_collate_fn(batch):
-#     """时序数据的collate函数"""
-#     sequences, ratings, targets = zip(*batch)
-#     sequences = torch.stack(sequences)  # [batch_size, seq_len, 4]
-#     ratings = torch.stack(ratings)      # [batch_size, seq_len]
-#     targets = torch.stack(targets).squeeze()  # [batch_size]
-#     return sequences, ratings, targets
-
-
-# def prepare_sequential_training_data(train_data):
-#     """准备时序训练数据"""
-#     sequential_data = []
-    
-#     # 按用户分组，每个用户的数据按时间排序
-#     for user_id in train_data['user_emb_id'].unique():
-#         user_data = train_data[train_data['user_emb_id'] == user_id].copy()
-#         user_data = user_data.sort_values('timestamp')
-        
-#         # 为每个用户创建序列
-#         if len(user_data) > 1:  # 至少需要2个评分来创建序列
-#             for i in range(1, len(user_data)):
-#                 # 使用前i个评分预测第i+1个评分
-#                 sequence = user_data.iloc[:i+1]
-#                 sequential_data.append({
-#                     'user_id': user_id,
-#                     'sequence': sequence,
-#                     'target_rating': sequence.iloc[-1]['rating']
-#                 })
-    
-#     return sequential_data
-
-# def create_sequential_dataloader(sequential_data, batch_size, model):
-#     """创建时序数据加载器"""
-#     dataset = SequentialTrainingDataset(sequential_data, model)
-#     return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=sequential_collate_fn)
-
-# def create_random_dataloader(data, batch_size, shuffle=True):
-#     """创建随机顺序的数据加载器"""
-#     dataset = MovieLensDataset(
-#         data['user_emb_id'].values,
-#         data['movie_emb_id'].values,
-#         data['rating'].values,
-#         data['daytime'].values,
-#         data['is_weekend'].values,
-#         data['year'].values
-#     )
-#     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-
-# def get_lstm_predictions_for_data(model, data, sequential_data, device):
-#     """为数据获取LSTM预测"""
-#     model.eval()
-#     model.set_training_stage(1)
-    
-#     predictions = []
-    
-#     # 创建用户序列映射
-#     user_sequences = {}
-#     for item in sequential_data:
-#         user_id = item['user_id']
-#         if user_id not in user_sequences:
-#             user_sequences[user_id] = []
-#         user_sequences[user_id].append(item)
-    
-#     with torch.no_grad():
-#         for _, row in data.iterrows():
-#             user_id = row['user_emb_id']
-            
-#             if user_id in user_sequences and user_sequences[user_id]:
-#                 # 使用最新的序列
-#                 latest_sequence = user_sequences[user_id][-1]
-#                 sequence = latest_sequence['sequence']
-                
-#                 # 构建特征序列
-#                 features = []
-#                 for _, seq_row in sequence.iterrows():
-#                     feature_vector = [
-#                         seq_row['user_emb_id'],
-#                         seq_row['daytime'],
-#                         seq_row['is_weekend'],
-#                         seq_row['year'],
-#                         seq_row['rating']
-#                     ]
-#                     features.append(feature_vector)
-                
-#                 # 填充到固定长度
-#                 max_seq_len = 20
-#                 if len(features) > max_seq_len:
-#                     features = features[-max_seq_len:]
-#                 else:
-#                     while len(features) < max_seq_len:
-#                         features.insert(0, [0, 0, 0, 0, 0])
-                
-#                 sequence_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)
-#                 pred = model(sequence_tensor)
-#                 predictions.append(pred.item())
-#             else:
-#                 # 如果没有序列数据，使用默认值
-#                 predictions.append(3.0)  # 默认评分
-    
-#     return predictions
-
-# def get_cf_predictions_for_data(model, data, device):
-#     """为数据获取CF预测"""
-#     model.eval()
-#     model.set_training_stage(2)
-    
-#     predictions = []
-    
-#     with torch.no_grad():
-#         for _, row in data.iterrows():
-#             user_tensor = torch.LongTensor([row['user_emb_id']]).to(device)
-#             item_tensor = torch.LongTensor([row['movie_emb_id']]).to(device)
-#             daytime_tensor = torch.LongTensor([row['daytime']]).to(device)
-#             weekend_tensor = torch.LongTensor([row['is_weekend']]).to(device)
-#             year_tensor = torch.LongTensor([row['year']]).to(device)
-            
-#             pred = model(user_tensor, item_tensor, daytime_tensor, weekend_tensor, year_tensor)
-#             predictions.append(pred.item())
-    
-#     return predictions
-
-# def create_fusion_dataloader(model, data, sequential_data, batch_size, device, shuffle=True):
-#     """创建融合训练的数据加载器"""
-#     # 预计算LSTM和CF的预测结果
-#     lstm_predictions = get_lstm_predictions_for_data(model, data, sequential_data, device)
-#     cf_predictions = get_cf_predictions_for_data(model, data, device)
-    
-#     dataset = FusionTrainingDataset(data, lstm_predictions, cf_predictions)
-#     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-
-# def evaluate_stage(model, val_loader, criterion, device):
-#     """评估某个阶段的性能"""
-#     model.eval()
-#     total_loss = 0
-#     num_batches = 0
-    
-#     with torch.no_grad():
-#         for batch in val_loader:
-#             if model.training_stage == 1:
-#                 # LSTM评估
-#                 sequences, ratings, targets = batch
-#                 sequences = sequences.to(device)
-#                 ratings = ratings.to(device)
-#                 targets = targets.to(device)
-#                 predictions = model(sequences, ratings)  # 修改这里
-#             elif model.training_stage == 2:
-#                 # CF评估
-#                 users, items, ratings, daytime, weekend, years = batch
-#                 users = users.to(device)
-#                 items = items.to(device)
-#                 ratings = ratings.to(device)
-#                 daytime = daytime.to(device)
-#                 weekend = weekend.to(device)
-#                 years = years.to(device)
-#                 predictions = model(users, items, daytime, weekend, years)
-#                 targets = ratings
-#             elif model.training_stage == 3:
-#                 # MMoE评估
-#                 users, items, ratings, daytime, weekend, years, lstm_preds, cf_preds = batch
-#                 users = users.to(device)
-#                 items = items.to(device)
-#                 ratings = ratings.to(device)
-#                 daytime = daytime.to(device)
-#                 weekend = weekend.to(device)
-#                 years = years.to(device)
-#                 lstm_preds = lstm_preds.to(device)
-#                 cf_preds = cf_preds.to(device)
-#                 predictions = model(users, items, daytime, weekend, years, lstm_preds, cf_preds)
-#                 targets = ratings
-            
-#             loss = criterion(predictions, targets)
-#             total_loss += loss.item()
-#             num_batches += 1
-    
-#     return total_loss / num_batches
-
-# def train_stage(model, train_loader, val_loader, criterion, optimizer, device, num_epochs, stage_name):
-#     """单个阶段的训练函数"""
-#     best_loss = float('inf')
-    
-#     for epoch in range(num_epochs):
-#         model.train()
-#         total_loss = 0
-#         num_batches = 0
-        
-#         for batch in train_loader:
-#             optimizer.zero_grad()
-            
-#             if model.training_stage == 1:
-#                 # LSTM训练
-#                 sequences, ratings, targets = batch
-#                 sequences = sequences.to(device)
-#                 ratings = ratings.to(device)
-#                 targets = targets.to(device)
-#                 predictions = model(sequences, ratings)  # 修改这里
-#             elif model.training_stage == 2:
-#                 # CF训练
-#                 users, items, ratings, daytime, weekend, years = batch
-#                 users = users.to(device)
-#                 items = items.to(device)
-#                 ratings = ratings.to(device)
-#                 daytime = daytime.to(device)
-#                 weekend = weekend.to(device)
-#                 years = years.to(device)
-#                 predictions = model(users, items, daytime, weekend, years)
-#                 targets = ratings
-#             elif model.training_stage == 3:
-#                 # MMoE训练
-#                 users, items, ratings, daytime, weekend, years, lstm_preds, cf_preds = batch
-#                 users = users.to(device)
-#                 items = items.to(device)
-#                 ratings = ratings.to(device)
-#                 daytime = daytime.to(device)
-#                 weekend = weekend.to(device)
-#                 years = years.to(device)
-#                 lstm_preds = lstm_preds.to(device)
-#                 cf_preds = cf_preds.to(device)
-#                 predictions = model(users, items, daytime, weekend, years, lstm_preds, cf_preds)
-#                 targets = ratings
-            
-#             loss = criterion(predictions, targets)
-#             reg_loss = model.get_regularization_loss()
-#             total_loss_batch = loss + reg_loss
-            
-#             total_loss_batch.backward()
-            
-#             # 梯度裁剪
-#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-#             optimizer.step()
-            
-#             total_loss += loss.item()
-#             num_batches += 1
-        
-#         avg_loss = total_loss / num_batches
-        
-#         # 验证
-#         if val_loader is not None:
-#             val_loss = evaluate_stage(model, val_loader, criterion, device)
-#             print(f"{stage_name} Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}")
-#             if val_loss < best_loss:
-#                 best_loss = val_loss
-#         else:
-#             print(f"{stage_name} Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_loss:.4f}")
-#             if avg_loss < best_loss:
-#                 best_loss = avg_loss
-    
-#     return best_loss
-
-# def train_two_stage_model(model, train_data, val_data, device, 
-#                          batch_size=256, num_epochs_per_stage=[10, 15, 10], 
-#                          learning_rates=[0.001, 0.001, 0.0005]):
-#     """两阶段训练函数"""
-    
-#     # 阶段1：训练LSTM时序建模
-#     print("=" * 50)
-#     print("阶段1：训练LSTM时序建模")
-#     print("=" * 50)
-    
-#     model.set_training_stage(1)
-    
-#     # 准备时序数据（按用户和时间排序）
-#     sequential_data = prepare_sequential_training_data(train_data)
-#     sequential_loader = create_sequential_dataloader(sequential_data, batch_size, model)  # 传入model
-    
-#     optimizer1 = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
-#                                   lr=learning_rates[0])
-#     criterion = nn.MSELoss()
-    
-#     best_lstm_loss = train_stage(model, sequential_loader, None, criterion, optimizer1, 
-#                                 device, num_epochs_per_stage[0], stage_name="LSTM")
-    
-#     # 阶段2：训练CF网络
-#     print("=" * 50)
-#     print("阶段2：训练CF网络")
-#     print("=" * 50)
-    
-#     model.set_training_stage(2)
-    
-#     # 准备乱序数据
-#     random_loader = create_random_dataloader(train_data, batch_size)
-#     val_loader = create_random_dataloader(val_data, batch_size, shuffle=False)
-    
-#     optimizer2 = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
-#                                   lr=learning_rates[1])
-    
-#     best_cf_loss = train_stage(model, random_loader, val_loader, criterion, optimizer2, 
-#                               device, num_epochs_per_stage[1], stage_name="CF")
-    
-#     # 阶段3：训练MMoE融合
-#     print("=" * 50)
-#     print("阶段3：训练MMoE融合")
-#     print("=" * 50)
-    
-#     model.set_training_stage(3)
-    
-#     # 准备融合训练数据
-#     fusion_loader = create_fusion_dataloader(model, train_data, sequential_data, batch_size, device)
-#     fusion_val_loader = create_fusion_dataloader(model, val_data, sequential_data, batch_size, device, shuffle=False)
-    
-#     optimizer3 = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
-#                                   lr=learning_rates[2])
-    
-#     best_mmoe_loss = train_stage(model, fusion_loader, fusion_val_loader, criterion, optimizer3, 
-#                                 device, num_epochs_per_stage[2], stage_name="MMoE")
-    
-#     print("=" * 50)
-#     print("训练完成!")
-#     print(f"最佳LSTM损失: {best_lstm_loss:.4f}")
-#     print(f"最佳CF损失: {best_cf_loss:.4f}")
-#     print(f"最佳MMoE损失: {best_mmoe_loss:.4f}")
-#     print("=" * 50)
-    
-#     return model
-
-# def save_checkpoint(model, optimizer, config, path):
-#     """安全保存模型检查点"""
-#     try:
-#         save_dict = {
-#             'model_state_dict': model.state_dict(),
-#             'optimizer_state_dict': optimizer.state_dict(),
-#             **config
-#         }
-#         torch.save(save_dict, path, _use_new_zipfile_serialization=False)
-#         logging.info(f'Model saved to {path}')
-#     except Exception as e:
-#         logging.error(f"保存模型失败: {str(e)}")
-#         raise
-
-# def main():
-#     """主训练函数"""
-#     # 设置日志
-#     logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
-    
-#     # 配置参数
-#     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#     K_FACTORS = 80
-#     TIME_FACTORS = 20
-#     BATCH_SIZE = 256
-#     NUM_EPOCHS_PER_STAGE = [5, 10, 5]  # LSTM, CF, MMoE的训练轮数
-#     LEARNING_RATES = [0.001, 0.001, 0.0005]
-#     REG_STRENGTH = 0.001
-#     NUM_EXPERTS = 4
-    
-#     logging.info(f'Using device: {DEVICE}')
-    
-#     # 设置分割数据路径
-#     split_path = data_path + 'split_data'
-    
-#     # 检查是否已有分割数据
-#     if check_split_data_exists(split_path):
-#         logging.info("Found existing split data, loading...")
-#         train_data, val_data, test_data = load_existing_split_data(split_path)
-        
-#         if train_data is not None and val_data is not None and test_data is not None:
-#             logging.info(f'Loaded existing split - Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}')
-#         else:
-#             logging.info("Failed to load existing split data, creating new split...")
-#             ratings, users, movies = load_data(data_path + 'ratings.csv',
-#                                              data_path + 'users.csv',
-#                                              data_path + 'movies.csv')
-            
-#             logging.info(f'Loaded {len(ratings)} ratings')
-#             train_data, val_data, test_data = create_time_aware_split(ratings, random_state=42)
-#             save_split_data(train_data, val_data, test_data, split_path)
-#             logging.info(f'Created new split - Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}')
-#     else:
-#         logging.info("No existing split data found, creating new split...")
-#         ratings, users, movies = load_data(data_path + 'ratings.csv',
-#                                          data_path + 'users.csv',
-#                                          data_path + 'movies.csv')
-        
-#         logging.info(f'Loaded {len(ratings)} ratings')
-#         train_data, val_data, test_data = create_time_aware_split(ratings, random_state=42)
-#         save_split_data(train_data, val_data, test_data, split_path)
-#         logging.info(f'Created new split - Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}')
-    
-#     # 获取最大ID
-#     if 'ratings' not in locals():
-#         ratings_temp = pd.read_csv(data_path + 'ratings.csv', sep='\t', encoding='latin-1')
-#         max_userid = ratings_temp['user_id'].max()
-#         max_movieid = ratings_temp['movie_id'].max()
-#         del ratings_temp
-#     else:
-#         max_userid = ratings['user_id'].max()
-#         max_movieid = ratings['movie_id'].max()
-    
-#     logging.info(f'Max user ID: {max_userid}, Max movie ID: {max_movieid}')
-    
-#     # 初始化TwoStageMMoE模型
-#     model = TwoStageMMoEModel(
-#         max_userid + 1, max_movieid + 1, K_FACTORS, TIME_FACTORS, REG_STRENGTH, NUM_EXPERTS
-#     ).to(DEVICE)
-    
-#     # 两阶段训练
-#     model = train_two_stage_model(
-#         model, train_data, val_data, DEVICE, 
-#         batch_size=BATCH_SIZE, 
-#         num_epochs_per_stage=NUM_EPOCHS_PER_STAGE,
-#         learning_rates=LEARNING_RATES
-#     )
-    
-#     # 保存模型
-#     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATES[0])
-#     config = {
-#         'max_userid': max_userid,
-#         'max_movieid': max_movieid,
-#         'k_factors': K_FACTORS,
-#         'time_factors': TIME_FACTORS,
-#         'best_model_state': model.state_dict(),
-#         'data_split_path': split_path,
-#         'model_type': model.name,
-#         'num_experts': NUM_EXPERTS,
-#         'reg_strength': REG_STRENGTH
-#     }
-    
-#     save_checkpoint(model, optimizer, config, data_path + 'model/' + 'model_checkpoint_' + model.name + '.pt')
-    
-#     return model, test_data
-
-# if __name__ == "__main__":
-#     main()

@@ -18,6 +18,7 @@ class CFModel(nn.Module):
         
         # 初始化权重
         self._init_weights()
+        self.name = "CF"
         
     def _init_weights(self):
         # 使用Xavier初始化，更适合协同过滤
