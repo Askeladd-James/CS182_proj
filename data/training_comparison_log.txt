@@ -1,15 +1,67 @@
-2025-06-08 23:13:51,597 - INFO - ================================================================================
-2025-06-08 23:13:51,597 - INFO - 🆕 新的模型训练比较流程开始
-2025-06-08 23:13:51,597 - INFO - ================================================================================
-2025-06-08 23:13:51,697 - INFO - 使用设备: cuda
-2025-06-08 23:13:51,697 - INFO - 配置参数: {'DEVICE': device(type='cuda'), 'K_FACTORS': 100, 'TIME_FACTORS': 40, 'BATCH_SIZE': 256, 'NUM_EPOCHS': 30, 'LEARNING_RATE': 0.001, 'REG_STRENGTH': 0.001, 'NUM_EXPERTS': 4, 'NUM_EPOCHS_PER_STAGE': [30, 30, 30], 'LEARNING_RATES': [0.001, 0.001, 0.0005]}
-2025-06-08 23:13:51,698 - INFO - 学习率调度器: ReduceLROnPlateau (factor=0.6, patience=5)
-2025-06-08 23:13:51,700 - INFO - 加载现有数据分割...
-2025-06-08 23:13:52,125 - INFO - Loaded existing split data from ./data/split_data
-2025-06-08 23:13:52,126 - INFO - 数据分割 - 训练: 805443, 验证: 97383, 测试: 97383
-2025-06-08 23:13:52,152 - INFO - 
+2025-06-08 23:42:04,769 - INFO - ================================================================================
+2025-06-08 23:42:04,770 - INFO - New complete model training comparison process started
+2025-06-08 23:42:04,770 - INFO - All old result and model files have been cleared
+2025-06-08 23:42:04,770 - INFO - ================================================================================
+2025-06-08 23:42:04,793 - INFO - Using device: cuda
+2025-06-08 23:42:04,793 - INFO - Configuration parameters: {'DEVICE': device(type='cuda'), 'K_FACTORS': 100, 'TIME_FACTORS': 40, 'BATCH_SIZE': 256, 'NUM_EPOCHS': 30, 'LEARNING_RATE': 0.001, 'REG_STRENGTH': 0.001, 'NUM_EXPERTS': 4, 'NUM_EPOCHS_PER_STAGE': [30, 30, 30], 'LEARNING_RATES': [0.0005, 0.001, 0.0005]}
+2025-06-08 23:42:04,794 - INFO - Learning rate scheduler: ReduceLROnPlateau (factor=0.6, patience=5)
+2025-06-08 23:42:04,795 - INFO - Loading existing data split...
+2025-06-08 23:42:05,251 - INFO - Loaded existing split data from ./data/split_data
+2025-06-08 23:42:05,251 - INFO - Data split - Train: 805443, Validation: 97383, Test: 97383
+2025-06-08 23:42:05,257 - INFO - 
 ============================================================
-2025-06-08 23:13:52,152 - INFO - 开始训练和评估Baseline模型: Baseline Collaborative Filtering
-2025-06-08 23:13:52,153 - INFO - ============================================================
-2025-06-08 23:13:52,458 - INFO - Baseline模型参数: 总数=1,009,193, 可训练=1,009,193
-2025-06-08 23:13:54,307 - INFO - 开始训练Baseline模型
+2025-06-08 23:42:05,258 - INFO - Starting training and evaluation: User-Movie Time-Aware Model
+2025-06-08 23:42:05,258 - INFO - ============================================================
+2025-06-08 23:42:05,348 - INFO - User-Movie Time-Aware Model parameters: Total=1,046,099, Trainable=1,046,099
+2025-06-08 23:42:06,426 - INFO - Starting training model: UserTime
+2025-06-08 23:42:27,620 - INFO - Epoch 1/30 (21.19s)
+2025-06-08 23:42:27,620 - INFO - Train Loss: 1.1350, Train RMSE: 1.0653
+2025-06-08 23:42:27,620 - INFO - Val Loss: 0.8597, Val RMSE: 0.9272
+2025-06-08 23:42:27,620 - INFO - Learning rate: 0.001000
+2025-06-08 23:42:27,620 - INFO - New best validation loss: 0.8597
+2025-06-08 23:42:47,603 - INFO - Epoch 2/30 (19.98s)
+2025-06-08 23:42:47,603 - INFO - Train Loss: 0.8063, Train RMSE: 0.8979
+2025-06-08 23:42:47,603 - INFO - Val Loss: 0.7949, Val RMSE: 0.8916
+2025-06-08 23:42:47,603 - INFO - Learning rate: 0.001000
+2025-06-08 23:42:47,603 - INFO - New best validation loss: 0.7949
+2025-06-08 23:43:08,258 - INFO - Epoch 3/30 (20.65s)
+2025-06-08 23:43:08,258 - INFO - Train Loss: 0.7468, Train RMSE: 0.8642
+2025-06-08 23:43:08,258 - INFO - Val Loss: 0.7625, Val RMSE: 0.8732
+2025-06-08 23:43:08,258 - INFO - Learning rate: 0.001000
+2025-06-08 23:43:08,259 - INFO - New best validation loss: 0.7625
+2025-06-08 23:43:28,590 - INFO - Epoch 4/30 (20.33s)
+2025-06-08 23:43:28,590 - INFO - Train Loss: 0.6994, Train RMSE: 0.8363
+2025-06-08 23:43:28,591 - INFO - Val Loss: 0.7443, Val RMSE: 0.8627
+2025-06-08 23:43:28,591 - INFO - Learning rate: 0.001000
+2025-06-08 23:43:28,591 - INFO - New best validation loss: 0.7443
+2025-06-08 23:43:50,600 - INFO - Epoch 5/30 (22.01s)
+2025-06-08 23:43:50,600 - INFO - Train Loss: 0.6589, Train RMSE: 0.8117
+2025-06-08 23:43:50,601 - INFO - Val Loss: 0.7339, Val RMSE: 0.8567
+2025-06-08 23:43:50,601 - INFO - Learning rate: 0.001000
+2025-06-08 23:43:50,601 - INFO - New best validation loss: 0.7339
+2025-06-08 23:44:13,877 - INFO - Epoch 6/30 (23.28s)
+2025-06-08 23:44:13,878 - INFO - Train Loss: 0.6251, Train RMSE: 0.7906
+2025-06-08 23:44:13,878 - INFO - Val Loss: 0.7298, Val RMSE: 0.8543
+2025-06-08 23:44:13,879 - INFO - Learning rate: 0.001000
+2025-06-08 23:44:13,879 - INFO - New best validation loss: 0.7298
+2025-06-08 23:44:36,455 - INFO - Epoch 7/30 (22.58s)
+2025-06-08 23:44:36,456 - INFO - Train Loss: 0.5985, Train RMSE: 0.7736
+2025-06-08 23:44:36,456 - INFO - Val Loss: 0.7288, Val RMSE: 0.8537
+2025-06-08 23:44:36,456 - INFO - Learning rate: 0.001000
+2025-06-08 23:44:36,456 - INFO - New best validation loss: 0.7288
+2025-06-08 23:44:57,479 - INFO - Epoch 8/30 (21.02s)
+2025-06-08 23:44:57,479 - INFO - Train Loss: 0.5775, Train RMSE: 0.7599
+2025-06-08 23:44:57,479 - INFO - Val Loss: 0.7296, Val RMSE: 0.8542
+2025-06-08 23:44:57,480 - INFO - Learning rate: 0.001000
+2025-06-08 23:45:17,250 - INFO - Epoch 9/30 (19.77s)
+2025-06-08 23:45:17,250 - INFO - Train Loss: 0.5601, Train RMSE: 0.7484
+2025-06-08 23:45:17,250 - INFO - Val Loss: 0.7315, Val RMSE: 0.8553
+2025-06-08 23:45:17,250 - INFO - Learning rate: 0.001000
+2025-06-08 23:45:39,996 - INFO - Epoch 10/30 (22.74s)
+2025-06-08 23:45:39,996 - INFO - Train Loss: 0.5487, Train RMSE: 0.7408
+2025-06-08 23:45:39,996 - INFO - Val Loss: 0.7333, Val RMSE: 0.8563
+2025-06-08 23:45:39,997 - INFO - Learning rate: 0.001000
+2025-06-08 23:46:09,826 - INFO - Epoch 11/30 (29.83s)
+2025-06-08 23:46:09,826 - INFO - Train Loss: 0.5380, Train RMSE: 0.7335
+2025-06-08 23:46:09,827 - INFO - Val Loss: 0.7344, Val RMSE: 0.8570
+2025-06-08 23:46:09,827 - INFO - Learning rate: 0.001000
