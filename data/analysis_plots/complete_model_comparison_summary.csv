@@ -1,5 +1,0 @@
-﻿Model Name,Category,Model Type,RMSE,MAE,MAPE (%),Correlation,Parameter Count,Training Info,Training Time (s),Inference Time (s),Learning Rate Change,Best Epoch
-Baseline Collaborative Filtering,Baseline CF,CFModel_Baseline,0.8898,0.6977,26.51,0.6114,"1,009,193",15 epochs,205.8,25.146,0.001000→0.000600 (-40.0%),5
-用户时间感知模型,Time-Aware CF,IndependentTime,0.8556,0.6713,25.66,0.6441,"1,033,219",16 epochs,343.9,57.624,0.001000→0.000600 (-40.0%),6
-独立时间特征模型,Time-Aware CF,UMTime,0.8525,0.6702,25.93,0.6474,"1,015,079",30 epochs,616.0,51.025,0.001000→0.000600 (-40.0%),30
-用户电影时间感知模型,Time-Aware CF,UserTime,0.8625,0.6752,25.94,0.6372,"1,028,149",18 epochs,393.2,61.415,0.001000→0.000600 (-40.0%),8

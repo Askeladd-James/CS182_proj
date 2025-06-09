@@ -108,7 +108,7 @@ class IndependentTimeModel(nn.Module):
 
 # 回来改个名字，这三个都是和时间相关的
 class UserTimeModel(nn.Module):
-    def __init__(self, n_users, m_items, k_factors, time_factors=10, reg_strength=0.01):
+    def __init__(self, n_users, m_items, k_factors, time_factors=20, reg_strength=0.01):
         super(UserTimeModel, self).__init__()
         self.reg_strength = reg_strength  # 添加正则化强度参数
         self.name = Models[1]

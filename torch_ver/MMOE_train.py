@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader, Dataset
 import logging
 import pandas as pd
 import numpy as np
+import time
+import math
 from pathlib import Path
 
 class OptimizedTemporalDataset(Dataset):
@@ -472,91 +474,147 @@ def evaluate_stage(model, val_loader, criterion, device):
     return total_loss / num_batches
 
 def train_mmoe(model, train_data, val_data, device, batch_size=256, 
-                        num_epochs_per_stage=[40, 40, 20], learning_rates=[0.001, 0.001, 0.0005]):
-    """优化的MMoE训练函数 - 调整参数以提升性能"""
+               num_epochs_per_stage=[40, 50, 40], learning_rates=[0.001, 0.002, 0.0005]):
+    """修复的MMoE训练函数 - 正确记录训练时间"""
     
-    # 准备用户历史统计特征
     print("准备用户历史统计特征...")
     user_history_stats = prepare_user_history_stats(train_data)
     val_user_history_stats = prepare_user_history_stats(val_data)
     
     criterion = nn.MSELoss()
-    all_training_history = {}
     
-    # 阶段1：时序建模 - 使用更大的学习率
+    # 🔧 修复：创建统一的训练历史记录
+    unified_training_history = {
+        'train_losses': [],
+        'val_losses': [],
+        'train_rmse': [],
+        'val_rmse': [],
+        'learning_rates': [],
+        'epoch_times': [],
+        'best_epoch': 0,
+        'total_epochs': 0,
+        'total_training_time': 0.0,
+        'stage_info': []  # 记录每个阶段的信息
+    }
+    
+    # 🔧 记录总的开始时间
+    total_start_time = time.time()
+    
+    # 阶段1：时序建模
     print("=" * 50)
-    print("阶段1：时序建模 (改进版)")
+    print("阶段1：时序建模")
     print("=" * 50)
     
+    stage1_start = time.time()
     model.set_training_stage(1)
     temporal_loader = create_temporal_dataloader(train_data, user_history_stats, batch_size)
     temporal_val_loader = create_temporal_dataloader(val_data, val_user_history_stats, batch_size, shuffle=False)
     
-    # 🔧 改进1: 使用Adam + ReduceLROnPlateau替代余弦退火
-    optimizer1 = torch.optim.Adam(
+    optimizer1 = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
         lr=learning_rates[0], 
-        weight_decay=1e-6,  # 减少weight decay
+        weight_decay=1e-5,
         betas=(0.9, 0.999)
     )
     
     scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer1, 
-        mode='min', 
-        factor=0.7, 
-        patience=8, 
-        min_lr=1e-6
+        optimizer1, mode='min', factor=0.7, patience=5, min_lr=1e-7
     )
     
     best_temporal_loss, temporal_history = train_stage(
         model, temporal_loader, temporal_val_loader, criterion, optimizer1, 
-        device, num_epochs_per_stage[0], "Temporal", patience=8, scheduler=scheduler1, stage_num=1
+        device, num_epochs_per_stage[0], "Temporal", patience=5, scheduler=scheduler1, stage_num=1
     )
-    all_training_history['temporal'] = temporal_history
     
-    print(f"阶段1完成 - 最终学习率: {optimizer1.param_groups[0]['lr']:.6f}")
-    print(f"时序建模最佳损失: {best_temporal_loss:.4f}")
+    stage1_time = time.time() - stage1_start
     
-    # 阶段2：CF建模 - 重点改进
+    # 🔧 合并阶段1的历史到统一历史
+    unified_training_history['train_losses'].extend(temporal_history['train_losses'])
+    unified_training_history['val_losses'].extend(temporal_history['val_losses'])
+    if 'learning_rates' in temporal_history:
+        unified_training_history['learning_rates'].extend(temporal_history['learning_rates'])
+    if 'epoch_times' in temporal_history:
+        unified_training_history['epoch_times'].extend(temporal_history['epoch_times'])
+    
+    # 计算RMSE
+    temporal_rmse = [math.sqrt(loss) for loss in temporal_history['train_losses']]
+    temporal_val_rmse = [math.sqrt(loss) for loss in temporal_history['val_losses']]
+    unified_training_history['train_rmse'].extend(temporal_rmse)
+    unified_training_history['val_rmse'].extend(temporal_val_rmse)
+    
+    # 记录阶段信息
+    unified_training_history['stage_info'].append({
+        'stage_name': 'Temporal',
+        'start_epoch': 0,
+        'end_epoch': temporal_history['total_epochs'] - 1,
+        'epochs': temporal_history['total_epochs'],
+        'best_loss': best_temporal_loss,
+        'training_time': stage1_time
+    })
+    
+    print(f"阶段1完成 - 训练时间: {stage1_time:.2f}s, 最佳损失: {best_temporal_loss:.4f}")
+    
+    # 阶段2：CF建模
     print("=" * 50)
-    print("阶段2：协同过滤建模 (完全对齐UMTimeModel)")
+    print("阶段2：协同过滤建模")
     print("=" * 50)
     
+    stage2_start = time.time()
     model.set_training_stage(2)
     cf_loader = create_standard_dataloader(train_data, batch_size)
     val_loader = create_standard_dataloader(val_data, batch_size, shuffle=False)
     
-    # 🔧 修复12: 使用与UMTimeModel完全相同的优化器配置
-    optimizer2 = torch.optim.AdamW(  # 改用AdamW，与train.py中UMTimeModel一致
+    optimizer2 = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=learning_rates[1],  # 0.002
-        weight_decay=1e-5,  # 与UMTimeModel完全一致
+        lr=learning_rates[1], 
+        weight_decay=1e-5,
         betas=(0.9, 0.999)
     )
     
-    # 🔧 修复13: 使用与UMTimeModel相同的学习率调度器配置
     scheduler2 = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer2, 
-        mode='min', 
-        factor=0.6,  # 与train.py中UMTimeModel一致
-        patience=5,  # 与train.py中UMTimeModel一致
-        min_lr=1e-6
+        optimizer2, mode='min', factor=0.6, patience=5, min_lr=1e-7
     )
     
     best_cf_loss, cf_history = train_stage(
         model, cf_loader, val_loader, criterion, optimizer2, 
-        device, num_epochs_per_stage[1], "CF", patience=10, scheduler=scheduler2, stage_num=2
+        device, num_epochs_per_stage[1], "CF", patience=5, scheduler=scheduler2, stage_num=2
     )
-    all_training_history['cf'] = cf_history
     
-    print(f"阶段2完成 - 最终学习率: {optimizer2.param_groups[0]['lr']:.6f}")
-    print(f"CF建模最佳损失: {best_cf_loss:.4f}")
+    stage2_time = time.time() - stage2_start
     
-    # 阶段3：MMoE融合 - 缩短训练时间，专注融合
+    # 🔧 合并阶段2的历史
+    current_epoch_offset = len(unified_training_history['train_losses'])
+    unified_training_history['train_losses'].extend(cf_history['train_losses'])
+    unified_training_history['val_losses'].extend(cf_history['val_losses'])
+    if 'learning_rates' in cf_history:
+        unified_training_history['learning_rates'].extend(cf_history['learning_rates'])
+    if 'epoch_times' in cf_history:
+        unified_training_history['epoch_times'].extend(cf_history['epoch_times'])
+    
+    # 计算RMSE
+    cf_rmse = [math.sqrt(loss) for loss in cf_history['train_losses']]
+    cf_val_rmse = [math.sqrt(loss) for loss in cf_history['val_losses']]
+    unified_training_history['train_rmse'].extend(cf_rmse)
+    unified_training_history['val_rmse'].extend(cf_val_rmse)
+    
+    # 记录阶段信息
+    unified_training_history['stage_info'].append({
+        'stage_name': 'CF',
+        'start_epoch': current_epoch_offset,
+        'end_epoch': current_epoch_offset + cf_history['total_epochs'] - 1,
+        'epochs': cf_history['total_epochs'],
+        'best_loss': best_cf_loss,
+        'training_time': stage2_time
+    })
+    
+    print(f"阶段2完成 - 训练时间: {stage2_time:.2f}s, 最佳损失: {best_cf_loss:.4f}")
+    
+    # 阶段3：MMoE融合
     print("=" * 50)
-    print("阶段3：MMoE融合 (改进版)")
+    print("阶段3：MMoE融合")
     print("=" * 50)
     
+    stage3_start = time.time()
     model.set_training_stage(3)
     
     # 清除旧缓存
@@ -580,30 +638,60 @@ def train_mmoe(model, train_data, val_data, device, batch_size=256,
         shuffle=False, cache_file=val_cache_file
     )
     
-    # 🔧 改进3: MMoE阶段使用适中的学习率
-    optimizer3 = torch.optim.Adam(
+    optimizer3 = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
         lr=learning_rates[2], 
-        weight_decay=1e-8,  # 最小的weight decay
+        weight_decay=1e-6,
         betas=(0.9, 0.999)
     )
     
     scheduler3 = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer3, 
-        mode='min', 
-        factor=0.8, 
-        patience=5, 
-        min_lr=1e-8
+        optimizer3, mode='min', factor=0.8, patience=5, min_lr=1e-8
     )
     
     best_mmoe_loss, mmoe_history = train_stage(
         model, fusion_loader, fusion_val_loader, criterion, optimizer3, 
-        device, num_epochs_per_stage[2], "MMoE", patience=10, scheduler=scheduler3, stage_num=3
+        device, num_epochs_per_stage[2], "MMoE", patience=5, scheduler=scheduler3, stage_num=3
     )
-    all_training_history['mmoe'] = mmoe_history
     
-    print(f"阶段3完成 - 最终学习率: {optimizer3.param_groups[0]['lr']:.6f}")
-    print(f"MMoE融合最佳损失: {best_mmoe_loss:.4f}")
+    stage3_time = time.time() - stage3_start
+    
+    # 🔧 合并阶段3的历史
+    current_epoch_offset = len(unified_training_history['train_losses'])
+    unified_training_history['train_losses'].extend(mmoe_history['train_losses'])
+    unified_training_history['val_losses'].extend(mmoe_history['val_losses'])
+    if 'learning_rates' in mmoe_history:
+        unified_training_history['learning_rates'].extend(mmoe_history['learning_rates'])
+    if 'epoch_times' in mmoe_history:
+        unified_training_history['epoch_times'].extend(mmoe_history['epoch_times'])
+    
+    # 计算RMSE
+    mmoe_rmse = [math.sqrt(loss) for loss in mmoe_history['train_losses']]
+    mmoe_val_rmse = [math.sqrt(loss) for loss in mmoe_history['val_losses']]
+    unified_training_history['train_rmse'].extend(mmoe_rmse)
+    unified_training_history['val_rmse'].extend(mmoe_val_rmse)
+    
+    # 记录阶段信息
+    unified_training_history['stage_info'].append({
+        'stage_name': 'MMoE',
+        'start_epoch': current_epoch_offset,
+        'end_epoch': current_epoch_offset + mmoe_history['total_epochs'] - 1,
+        'epochs': mmoe_history['total_epochs'],
+        'best_loss': best_mmoe_loss,
+        'training_time': stage3_time
+    })
+    
+    print(f"阶段3完成 - 训练时间: {stage3_time:.2f}s, 最佳损失: {best_mmoe_loss:.4f}")
+    
+    # 🔧 计算总的训练时间和统计信息
+    total_training_time = time.time() - total_start_time
+    unified_training_history['total_training_time'] = total_training_time
+    unified_training_history['total_epochs'] = len(unified_training_history['train_losses'])
+    
+    # 找到最佳验证损失的epoch
+    if unified_training_history['val_losses']:
+        best_val_idx = np.argmin(unified_training_history['val_losses'])
+        unified_training_history['best_epoch'] = best_val_idx
     
     # 详细的性能分析
     print("=" * 60)
@@ -611,10 +699,11 @@ def train_mmoe(model, train_data, val_data, device, batch_size=256,
     print("=" * 60)
     
     print(f"📊 各阶段性能:")
-    print(f"  时序建模损失: {best_temporal_loss:.6f} ({temporal_history['total_epochs']} epochs)")
-    print(f"  CF建模损失:   {best_cf_loss:.6f} ({cf_history['total_epochs']} epochs)")
-    print(f"  MMoE融合损失: {best_mmoe_loss:.6f} ({mmoe_history['total_epochs']} epochs)")
-    print(f"  总训练轮数:   {sum(h['total_epochs'] for h in all_training_history.values())}")
+    print(f"  时序建模损失: {best_temporal_loss:.6f} ({temporal_history['total_epochs']} epochs, {stage1_time:.1f}s)")
+    print(f"  CF建模损失:   {best_cf_loss:.6f} ({cf_history['total_epochs']} epochs, {stage2_time:.1f}s)")
+    print(f"  MMoE融合损失: {best_mmoe_loss:.6f} ({mmoe_history['total_epochs']} epochs, {stage3_time:.1f}s)")
+    print(f"  总训练轮数:   {unified_training_history['total_epochs']}")
+    print(f"  总训练时间:   {total_training_time:.2f}s")
     
     # 改进提升分析
     single_model_best = min(best_temporal_loss, best_cf_loss)
@@ -625,18 +714,10 @@ def train_mmoe(model, train_data, val_data, device, batch_size=256,
         degradation = ((best_mmoe_loss - single_model_best) / single_model_best * 100)
         print(f"⚠️  MMoE相对最佳单模型变化: +{degradation:.2f}%")
     
-    # 学习率变化分析
-    print(f"\n📈 学习率调度效果:")
-    for stage, history in all_training_history.items():
-        if history['learning_rates']:
-            initial_lr = history['learning_rates'][0]
-            final_lr = history['learning_rates'][-1]
-            lr_reduction = (1 - final_lr/initial_lr) * 100
-            print(f"  {stage.capitalize()}: {initial_lr:.6f} → {final_lr:.6f} (-{lr_reduction:.1f}%)")
-    
     print("=" * 60)
     
-    return model, all_training_history
+    # 🔧 修复：返回统一的训练历史，而不是分阶段的
+    return model, unified_training_history
 
 def main():
     """主函数 - 保持原有结构，适配改进模型"""

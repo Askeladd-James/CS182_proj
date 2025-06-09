@@ -30,22 +30,22 @@ from pathlib import Path
 
 MODELS_TO_TRAIN = {
     # 🔧 取消注释来训练对应的模型
-    "baseline": True,
-    "usertime": True,
-    "independent": True,
-    "umtime": True,
+    # "baseline": True,
+    # "usertime": True,
+    # "independent": True,
+    # "umtime": True,
     "mmoe": True,
 }
 
-FORCE_RETRAIN_ALL = True
+FORCE_RETRAIN_ALL = False
 
 # 单独控制每个模型的强制重训练
 FORCE_RETRAIN = {
-    "baseline": False,
-    "usertime": False,
-    "independent": False,
-    "umtime": False,
-    "mmoe": False,
+    # "baseline": True,
+    # "usertime": True,
+    # "independent": False,
+    # "umtime": True,
+    "mmoe": True,
 }
 # ===============================================
 
@@ -587,7 +587,7 @@ def train_and_evaluate_model(
 def train_and_evaluate_mmoe_model(
     model_name, max_userid, max_movieid, train_data, val_data, test_data, device, config
 ):
-    """MMOE model training and evaluation - safe save version"""
+    """修复的MMOE模型训练和评估函数"""
     logging.info(f"\n{'='*60}")
     logging.info(f"🚀 开始训练和评估 MMOE: {model_name}")
     logging.info(f"{'='*60}")
@@ -610,18 +610,6 @@ def train_and_evaluate_mmoe_model(
         f"📊 MMOE 模型参数: 总参数={total_params:,}, 可训练={trainable_params:,}"
     )
 
-    # Training history recording
-    all_training_history = {
-        "train_losses": [],
-        "val_losses": [],
-        "train_rmse": [],
-        "val_rmse": [],
-        "learning_rates": [],
-        "epoch_times": [],
-        "best_epoch": 0,
-        "total_epochs": 0,
-    }
-
     criterion = nn.MSELoss()
     start_time = time.time()
 
@@ -629,7 +617,7 @@ def train_and_evaluate_mmoe_model(
     from MMOE_train import train_mmoe
 
     try:
-        model, mmoe_history = train_mmoe(
+        model, training_history = train_mmoe(
             model,
             train_data,
             val_data,
@@ -639,96 +627,37 @@ def train_and_evaluate_mmoe_model(
             learning_rates=config.get("LEARNING_RATES", [0.0005, 0.001, 0.0005]),
         )
 
-        # Integrate training history
-        total_training_time = time.time() - start_time
-
-        # Process training history data
-        if isinstance(mmoe_history, dict) and any(
-            "stage" in key.lower() or key in ["temporal", "cf", "mmoe"]
-            for key in mmoe_history.keys()
-        ):
-            for stage_name, stage_history in mmoe_history.items():
-                if isinstance(stage_history, dict):
-                    # Merge training losses from all stages
-                    if "train_losses" in stage_history:
-                        all_training_history["train_losses"].extend(
-                            stage_history["train_losses"]
-                        )
-                    if "val_losses" in stage_history:
-                        all_training_history["val_losses"].extend(
-                            stage_history["val_losses"]
-                        )
-
-                    # Calculate RMSE
-                    if "train_losses" in stage_history:
-                        stage_train_rmse = [
-                            math.sqrt(loss) for loss in stage_history["train_losses"]
-                        ]
-                        all_training_history["train_rmse"].extend(stage_train_rmse)
-                    if "val_losses" in stage_history:
-                        stage_val_rmse = [
-                            math.sqrt(loss) for loss in stage_history["val_losses"]
-                        ]
-                        all_training_history["val_rmse"].extend(stage_val_rmse)
-
-                    # Merge learning rate history
-                    if "learning_rates" in stage_history:
-                        all_training_history["learning_rates"].extend(
-                            stage_history["learning_rates"]
-                        )
-                    else:
-                        stage_epochs = stage_history.get("total_epochs", 1)
-                        all_training_history["learning_rates"].extend(
-                            [0.001] * stage_epochs
-                        )
-
-                    # Merge training time
-                    if "epoch_times" in stage_history:
-                        all_training_history["epoch_times"].extend(
-                            stage_history["epoch_times"]
-                        )
-                    else:
-                        stage_epochs = stage_history.get("total_epochs", 1)
-                        all_training_history["epoch_times"].extend([1.0] * stage_epochs)
-
-        # Set overall statistics
-        all_training_history["total_training_time"] = total_training_time
-
-        if isinstance(mmoe_history, dict) and any(
-            "stage" in key.lower() or key in ["temporal", "cf", "mmoe"]
-            for key in mmoe_history.keys()
-        ):
-            all_training_history["total_epochs"] = sum(
-                stage_history.get("total_epochs", 0)
-                for stage_history in mmoe_history.values()
-                if isinstance(stage_history, dict)
-            )
-        else:
-            all_training_history["total_epochs"] = len(
-                all_training_history.get("train_losses", [])
-            )
-
-        # Set best epoch
-        if all_training_history["val_losses"]:
-            best_epoch_idx = np.argmin(all_training_history["val_losses"])
-            all_training_history["best_epoch"] = best_epoch_idx
-        else:
-            all_training_history["best_epoch"] = (
-                len(all_training_history.get("train_losses", [])) - 1
-            )
+        # 🔧 修复：现在training_history已经是统一格式，直接使用即可
+        total_training_time = training_history.get('total_training_time', time.time() - start_time)
+        
+        # 确保所有必要字段存在
+        if 'total_training_time' not in training_history:
+            training_history['total_training_time'] = total_training_time
+            
+        # 打印阶段信息（如果存在）
+        if 'stage_info' in training_history:
+            logging.info("📊 各阶段训练详情:")
+            for stage in training_history['stage_info']:
+                logging.info(f"  {stage['stage_name']}: {stage['epochs']} epochs, "
+                           f"{stage['training_time']:.1f}s, 最佳损失: {stage['best_loss']:.4f}")
 
     except Exception as e:
         logging.error(f"MMOE训练过程中出错: {str(e)}")
         import traceback
-
         logging.error(f"详细错误信息: {traceback.format_exc()}")
 
-        # Use default history record
-        all_training_history["total_training_time"] = time.time() - start_time
-        all_training_history["total_epochs"] = 0
-        all_training_history["best_epoch"] = 0
-
-        # Re-raise exception
+        # 使用默认历史记录
+        training_history = {
+            'train_losses': [],
+            'val_losses': [],
+            'train_rmse': [],
+            'val_rmse': [],
+            'learning_rates': [],
+            'epoch_times': [],
+            'best_epoch': 0,
+            'total_epochs': 0,
+            'total_training_time': time.time() - start_time
+        }
         raise
 
     # Evaluate MMOE model
@@ -736,11 +665,11 @@ def train_and_evaluate_mmoe_model(
     logging.info(f"📈 开始MMOE模型评估: {model_name}")
     test_metrics = evaluate_mmoe_model(model, test_data, device)
 
-    # Organize results
+    # 🔧 修复：简化结果组织，直接使用统一的training_history
     results = {
         "model_name": model_name,
         "model_type": model.name if hasattr(model, "name") else "TwoStageMMoE",
-        "training_history": all_training_history,
+        "training_history": training_history,  # 现在是统一格式
         "test_metrics": test_metrics,
         "model_params": {
             "total_params": total_params,
@@ -753,10 +682,10 @@ def train_and_evaluate_mmoe_model(
         "training_config": prepare_config_for_json(config),
     }
 
-    # 🔧 修复：在保存前转换 NumPy 类型
+    # Convert NumPy types
     results = convert_numpy_types(results)
 
-    # Save model checkpoint - safe save
+    # Save model checkpoint
     model_type_name = model.name if hasattr(model, "name") else "TwoStageMMoE"
     checkpoint = {
         "max_userid": max_userid,
@@ -767,7 +696,7 @@ def train_and_evaluate_mmoe_model(
         "num_experts": config["NUM_EXPERTS"],
         "best_model_state": model.state_dict(),
         "model_type": model_type_name,
-        "training_history": all_training_history,
+        "training_history": training_history,
         "test_metrics": test_metrics,
         "has_scheduler": True,
     }
@@ -777,7 +706,7 @@ def train_and_evaluate_mmoe_model(
     )
     save_model_safely(checkpoint, model_path, model_name)
 
-    # Save results JSON - safe save
+    # Save results JSON
     results_path = data_path + f"results/results_{model_type_name}_with_scheduler.json"
     save_results_safely(results, results_path, model_name)
 
@@ -785,17 +714,17 @@ def train_and_evaluate_mmoe_model(
     logging.info(f"📊 测试 RMSE: {test_metrics['RMSE']:.4f}")
     logging.info(f"📊 测试 MAE: {test_metrics['MAE']:.4f}")
 
-    # Print training history summary
-    if all_training_history["train_losses"]:
-        final_train_loss = all_training_history["train_losses"][-1]
+    # 🔧 修复：从统一历史中提取信息
+    if training_history["train_losses"]:
+        final_train_loss = training_history["train_losses"][-1]
         logging.info(f"📊 最终训练损失: {final_train_loss:.4f}")
 
-    if all_training_history["val_losses"]:
-        best_val_loss = min(all_training_history["val_losses"])
+    if training_history["val_losses"]:
+        best_val_loss = min(training_history["val_losses"])
         logging.info(f"📊 最佳验证损失: {best_val_loss:.4f}")
 
-    logging.info(f"📊 总训练轮数: {all_training_history['total_epochs']}")
-    logging.info(f"⏱️ 训练时间: {all_training_history['total_training_time']:.2f} 秒")
+    logging.info(f"📊 总训练轮数: {training_history['total_epochs']}")
+    logging.info(f"⏱️ 训练时间: {training_history['total_training_time']:.2f} 秒")
 
     return results
 
@@ -1436,14 +1365,14 @@ def main():
     config = {
         "DEVICE": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         "K_FACTORS": 100,
-        "TIME_FACTORS": 40,
+        "TIME_FACTORS": 20,
         "BATCH_SIZE": 256,
         "NUM_EPOCHS": 30,
         "LEARNING_RATE": 0.001,
-        "REG_STRENGTH": 0.0005,
+        "REG_STRENGTH": 0.001,
         "NUM_EXPERTS": 4,
-        "NUM_EPOCHS_PER_STAGE": [30, 30, 30],
-        "LEARNING_RATES": [0.001, 0.002, 0.001],  # Use optimized MMOE learning rates
+        "NUM_EPOCHS_PER_STAGE": [10, 10, 10],
+        "LEARNING_RATES": [0.001, 0.001, 0.0005],  # Use optimized MMOE learning rates
     }
 
     logging.info(f'🖥️ 使用设备: {config["DEVICE"]}')

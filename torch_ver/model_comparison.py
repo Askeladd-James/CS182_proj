@@ -108,7 +108,7 @@ class ModelComparison:
         return results
 
     def process_mmoe_stages(self):
-        """🔧 新增：将MMoE模型拆分为三个独立的阶段模型"""
+        """🔧 修改：使用MMoE训练历史中的阶段信息来分割，而不是固定轮数"""
         if not self.split_mmoe_stages:
             return self.results
         
@@ -116,53 +116,95 @@ class ModelComparison:
         
         for model_type, results in self.results.items():
             if "mmoe" in model_type.lower() or "twostage" in model_type.lower():
-                # 处理MMoE模型，拆分为三个阶段
+                # 处理MMoE模型，使用阶段信息来拆分
                 history = results.get("training_history", {})
                 train_losses = history.get("train_losses", [])
                 val_losses = history.get("val_losses", [])
                 learning_rates = history.get("learning_rates", [])
                 epoch_times = history.get("epoch_times", [])
+                stage_info = history.get("stage_info", [])  # 🔧 新增：获取阶段信息
                 
                 total_epochs = len(train_losses)
                 print(f"Processing MMoE model with {total_epochs} epochs into stages...")
                 
-                # 动态确定阶段边界
-                if total_epochs >= 90:
-                    # 标准三阶段：30+30+30
-                    stage_boundaries = [(0, 30), (30, 60), (60, 90)]
-                    stage_names = ["MMoE_Stage1", "MMoE_Stage2", "MMoE_Stage3"]
-                    stage_display_names = [
-                        "MMoE Stage 1: Temporal", 
-                        "MMoE Stage 2: CF", 
-                        "MMoE Stage 3: Fusion"
-                    ]
-                elif total_epochs >= 60:
-                    # 两个完整阶段 + 一个可能不完整的阶段
-                    stage_boundaries = [(0, 30), (30, 60), (60, total_epochs)]
-                    stage_names = ["MMoE_Stage1", "MMoE_Stage2", "MMoE_Stage3"]
-                    stage_display_names = [
-                        "MMoE Stage 1: Temporal", 
-                        "MMoE Stage 2: CF", 
-                        "MMoE Stage 3: Fusion (Early Stop)"
-                    ]
-                elif total_epochs >= 30:
-                    # 一个完整阶段 + 一个可能不完整的阶段
-                    stage_boundaries = [(0, 30), (30, total_epochs)]
-                    stage_names = ["MMoE_Stage1", "MMoE_Stage2"]
-                    stage_display_names = [
-                        "MMoE Stage 1: Temporal", 
-                        "MMoE Stage 2: CF (Early Stop)"
-                    ]
+                # 🔧 修改：优先使用阶段信息，如果没有则回退到固定边界
+                if stage_info and len(stage_info) > 0:
+                    print(f"  Found {len(stage_info)} stage info entries, using stage boundaries")
+                    
+                    # 使用阶段信息来确定边界
+                    stage_boundaries = []
+                    stage_names = []
+                    stage_display_names = []
+                    
+                    for i, stage in enumerate(stage_info):
+                        start_epoch = stage.get("start_epoch", 0)
+                        end_epoch = stage.get("end_epoch", start_epoch + stage.get("epochs", 10) - 1)
+                        stage_name = stage.get("stage_name", f"Stage{i+1}")
+                        
+                        # 转换为实际的边界格式 (start, end+1)，因为切片是左闭右开
+                        boundary_start = start_epoch
+                        boundary_end = end_epoch + 1
+                        
+                        # 确保边界不超过实际数据长度
+                        boundary_end = min(boundary_end, total_epochs)
+                        
+                        if boundary_end > boundary_start:
+                            stage_boundaries.append((boundary_start, boundary_end))
+                            
+                            # 生成阶段名称
+                            if "temporal" in stage_name.lower():
+                                display_name = "MMoE Stage 1: Temporal"
+                                type_name = "MMoE_Stage1"
+                            elif "cf" in stage_name.lower():
+                                display_name = "MMoE Stage 2: CF"
+                                type_name = "MMoE_Stage2"
+                            elif "mmoe" in stage_name.lower() or "fusion" in stage_name.lower():
+                                display_name = "MMoE Stage 3: Fusion"
+                                type_name = "MMoE_Stage3"
+                            else:
+                                display_name = f"MMoE {stage_name}"
+                                type_name = f"MMoE_Stage{i+1}"
+                            
+                            stage_names.append(type_name)
+                            stage_display_names.append(display_name)
+                            
+                            print(f"    Stage {i+1}: {stage_name} -> Epochs {boundary_start+1}-{boundary_end} ({boundary_end-boundary_start} epochs)")
+                    
                 else:
-                    # 只有一个不完整的阶段
-                    stage_boundaries = [(0, total_epochs)]
-                    stage_names = ["MMoE_Stage1"]
-                    stage_display_names = ["MMoE Stage 1: Temporal (Early Stop)"]
+                    print("  No stage info found, using fixed epoch boundaries")
+                    # 🔧 回退：如果没有阶段信息，使用原来的固定边界逻辑
+                    if total_epochs >= 90:
+                        stage_boundaries = [(0, 30), (30, 60), (60, 90)]
+                        stage_names = ["MMoE_Stage1", "MMoE_Stage2", "MMoE_Stage3"]
+                        stage_display_names = [
+                            "MMoE Stage 1: Temporal", 
+                            "MMoE Stage 2: CF", 
+                            "MMoE Stage 3: Fusion"
+                        ]
+                    elif total_epochs >= 60:
+                        stage_boundaries = [(0, 30), (30, 60), (60, total_epochs)]
+                        stage_names = ["MMoE_Stage1", "MMoE_Stage2", "MMoE_Stage3"]
+                        stage_display_names = [
+                            "MMoE Stage 1: Temporal", 
+                            "MMoE Stage 2: CF", 
+                            "MMoE Stage 3: Fusion (Early Stop)"
+                        ]
+                    elif total_epochs >= 30:
+                        stage_boundaries = [(0, 30), (30, total_epochs)]
+                        stage_names = ["MMoE_Stage1", "MMoE_Stage2"]
+                        stage_display_names = [
+                            "MMoE Stage 1: Temporal", 
+                            "MMoE Stage 2: CF (Early Stop)"
+                        ]
+                    else:
+                        stage_boundaries = [(0, total_epochs)]
+                        stage_names = ["MMoE_Stage1"]
+                        stage_display_names = ["MMoE Stage 1: Temporal (Early Stop)"]
                 
                 # 为每个阶段创建独立的"模型"结果
                 for i, ((start, end), stage_name, display_name) in enumerate(zip(stage_boundaries, stage_names, stage_display_names)):
                     if end > start:
-                        # 提取该阶段的训练历史（重新从epoch 1开始）
+                        # 提取该阶段的训练历史
                         stage_train_losses = train_losses[start:end] if train_losses else []
                         stage_val_losses = val_losses[start:end] if val_losses and end <= len(val_losses) else []
                         stage_learning_rates = learning_rates[start:end] if learning_rates and end <= len(learning_rates) else []
@@ -171,6 +213,10 @@ class ModelComparison:
                         # 计算阶段统计
                         stage_epochs = end - start
                         stage_training_time = sum(stage_epoch_times) if stage_epoch_times else 0
+                        
+                        # 🔧 优先使用阶段信息中的训练时间
+                        if stage_info and i < len(stage_info):
+                            stage_training_time = stage_info[i].get("training_time", stage_training_time)
                         
                         # 找到该阶段的最佳验证损失轮次
                         if stage_val_losses:
@@ -191,23 +237,23 @@ class ModelComparison:
                             "total_training_time": stage_training_time,
                         }
                         
-                        # 为每个阶段使用原始MMoE的测试结果（因为最终测试是用完整模型）
+                        # 为每个阶段使用原始MMoE的测试结果
                         stage_results = {
                             "model_name": display_name,
                             "model_type": stage_name,
                             "training_history": stage_history,
-                            "test_metrics": results.get("test_metrics", {}),  # 使用原始测试结果
-                            "model_params": results.get("model_params", {}),  # 使用原始参数信息
+                            "test_metrics": results.get("test_metrics", {}),
+                            "model_params": results.get("model_params", {}),
                             "training_config": results.get("training_config", {}),
                             # 标记这是MMoE的某个阶段
                             "is_mmoe_stage": True,
                             "stage_number": i + 1,
                             "stage_range": f"Epochs {start+1}-{end}",
-                            "original_mmoe_results": results  # 保留原始MMoE结果的引用
+                            "original_mmoe_results": results
                         }
                         
                         processed_results[stage_name] = stage_results
-                        print(f"  Created {display_name}: {stage_epochs} epochs ({start+1}-{end})")
+                        print(f"  Created {display_name}: {stage_epochs} epochs ({start+1}-{end}), training time: {stage_training_time:.1f}s")
                 
                 print(f"MMoE model split into {len(stage_boundaries)} independent stages")
                 
@@ -786,7 +832,7 @@ class ModelComparison:
         
         plt.xlabel("Model Parameters", fontsize=12)
         plt.ylabel("RMSE (Lower is Better)", fontsize=12)
-        plt.title("Model Efficiency Analysis - Including MMoE Stages\n(Bubble size represents training time, MMoE stages show individual performance)", 
+        plt.title("MMoE Stage Analysis - Including All Models\n(Bubble size represents training time, MMoE stages show individual performance)", 
                 fontsize=16, fontweight='bold')
         
         # Add legend for bubble sizes
@@ -801,10 +847,10 @@ class ModelComparison:
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
-        save_path = self.output_dir / "15_efficiency_analysis.png"
+        save_path = self.output_dir / "09_mmoe_stage_analysis.png"
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"✅ Efficiency analysis saved to: {save_path}")
+        print(f"✅ MMoE stage analysis saved to: {save_path}")
 
     def create_summary_table_image(self):
         """Plot 10: Summary Table as Image"""
@@ -925,7 +971,7 @@ class ModelComparison:
         return table_data, headers
 
     def plot_mmoe_detailed_training_curves(self):
-        """Plot 11: MMoE Detailed Stage Training - Single chart"""
+        """Plot 11: MMoE Detailed Stage Training - 使用阶段信息而非固定边界"""
         # Find MMoE model
         mmoe_results = None
         for model_type, results in self.results.items():
@@ -947,40 +993,64 @@ class ModelComparison:
             return
 
         total_epochs = len(history["train_losses"])
+        stage_info = history.get("stage_info", [])
+        
         print(f"MMoE total training epochs: {total_epochs}")
 
-        # 🔧 修复：动态确定阶段分割
-        if total_epochs < 10:
-            print(f"⚠️  MMoE training too short for stage analysis: {total_epochs} epochs")
-            return
-
-        # 根据实际轮数动态分阶段
-        if total_epochs >= 90:
-            # 标准三阶段：30+30+30
-            stages = {
-                "Stage 1: Temporal Modeling": (0, 30),
-                "Stage 2: CF Modeling": (30, 60),
-                "Stage 3: MMoE Fusion": (60, 90),
-            }
-        elif total_epochs >= 60:
-            # 两个完整阶段 + 一个可能不完整的阶段
-            stages = {
-                "Stage 1: Temporal Modeling": (0, 30),
-                "Stage 2: CF Modeling": (30, 60),
-                "Stage 3: MMoE Fusion (Early Stop)": (60, total_epochs),
-            }
-        elif total_epochs >= 30:
-            # 一个完整阶段 + 一个可能不完整的阶段
-            stage_2_end = min(total_epochs, 60)
-            stages = {
-                "Stage 1: Temporal Modeling": (0, 30),
-                "Stage 2: CF Modeling (Early Stop)": (30, stage_2_end),
-            }
+        # 🔧 修改：优先使用阶段信息
+        if stage_info and len(stage_info) > 0:
+            print(f"Using stage info with {len(stage_info)} stages")
+            
+            stages = {}
+            for i, stage in enumerate(stage_info):
+                start_epoch = stage.get("start_epoch", 0)
+                end_epoch = stage.get("end_epoch", start_epoch + stage.get("epochs", 10) - 1)
+                stage_name = stage.get("stage_name", f"Stage{i+1}")
+                
+                # 生成显示名称
+                if "temporal" in stage_name.lower():
+                    display_name = "Stage 1: Temporal Modeling"
+                elif "cf" in stage_name.lower():
+                    display_name = "Stage 2: CF Modeling"
+                elif "mmoe" in stage_name.lower() or "fusion" in stage_name.lower():
+                    display_name = "Stage 3: MMoE Fusion"
+                else:
+                    display_name = f"Stage {i+1}: {stage_name}"
+                
+                # 转换为边界格式 (注意+1因为切片是左闭右开)
+                stages[display_name] = (start_epoch, min(end_epoch + 1, total_epochs))
+                print(f"  {display_name}: epochs {start_epoch+1}-{end_epoch+1} ({stage.get('epochs', 0)} epochs)")
+            
         else:
-            # 只有一个不完整的阶段
-            stages = {
-                "Stage 1: Temporal Modeling (Early Stop)": (0, total_epochs),
-            }
+            print("No stage info found, using fixed boundaries")
+            # 回退到原来的固定边界逻辑
+            if total_epochs < 10:
+                print(f"⚠️  MMoE training too short for stage analysis: {total_epochs} epochs")
+                return
+
+            # 根据实际轮数动态分阶段
+            if total_epochs >= 90:
+                stages = {
+                    "Stage 1: Temporal Modeling": (0, 30),
+                    "Stage 2: CF Modeling": (30, 60),
+                    "Stage 3: MMoE Fusion": (60, 90),
+                }
+            elif total_epochs >= 60:
+                stages = {
+                    "Stage 1: Temporal Modeling": (0, 30),
+                    "Stage 2: CF Modeling": (30, 60),
+                    "Stage 3: MMoE Fusion (Early Stop)": (60, total_epochs),
+                }
+            elif total_epochs >= 30:
+                stage_2_end = min(total_epochs, 60)
+                stages = {
+                    "Stage 1: Temporal Modeling": (0, 30),
+                    "Stage 2: CF Modeling (Early Stop)": (30, stage_2_end),
+                }
+            else:
+                stages = {
+                    "Stage 1: Temporal Modeling (Early Stop)": (0, total_epochs),
+                }
 
         fig, axes = plt.subplots(len(stages), 2, figsize=(16, 6 * len(stages)))
         fig.suptitle(
@@ -1090,7 +1160,7 @@ class ModelComparison:
         print(f"✅ MMoE detailed training curves saved to: {save_path} ({total_epochs} epochs)")
 
     def plot_training_curves_with_mmoe_comparison(self):
-        """Plot 12: Training Curves with MMoE Comparison - Single chart"""
+        """Plot 12: Training Curves with MMoE Comparison - 使用动态阶段信息"""
         fig, axes = plt.subplots(2, 2, figsize=(20, 14))
         fig.suptitle(
             "Complete Training Process Comparison (All Models)",
@@ -1111,11 +1181,15 @@ class ModelComparison:
 
         for model_type, results in self.results.items():
             display_name = self.get_display_name(model_type, results)
+            training_history = results.get("training_history", {})
+            total_epochs = len(training_history.get("train_losses", []))
+            
             model_info = {
                 "type": model_type,
                 "results": results,
                 "name": display_name,
                 "is_mmoe": False,
+                "epochs": total_epochs,
             }
 
             if "mmoe" in model_type.lower() or "twostage" in model_type.lower():
@@ -1128,57 +1202,120 @@ class ModelComparison:
 
         print(f"Found {len(all_models_info)} models for comparison:")
         for model_info in all_models_info:
-            model_type_label = " (MMoE - 90 epochs)" if model_info["is_mmoe"] else " (30 epochs)"
+            # 🔧 修复：使用实际轮数而不是硬编码
+            epochs = model_info["epochs"]
+            model_type_label = f" (MMoE - {epochs} epochs)" if model_info["is_mmoe"] else f" ({epochs} epochs)"
             print(f"  - {model_info['name']}{model_type_label}")
 
         # 1. Training loss comparison - show all models
         ax = axes[0, 0]
 
-        # Plot other models (30 epochs)
+        # Plot other models
         for idx, (model_type, results) in enumerate(other_models):
             display_name = self.get_display_name(model_type, results)
             history = results["training_history"]
             if "train_losses" in history and history["train_losses"]:
                 epochs = range(1, len(history["train_losses"]) + 1)
+                total_epochs = len(history["train_losses"])
                 color = colors[idx % len(colors)]
                 ax.plot(
                     epochs, history["train_losses"],
-                    label=f"{display_name} (30ep)",
+                    label=f"{display_name} ({total_epochs}ep)",  # 🔧 使用实际轮数
                     color=color, linewidth=2, alpha=0.8,
                 )
 
-        # Plot MMoE (90 epochs) with special styling
+        # Plot MMoE with dynamic stage boundaries
         if mmoe_data:
             _, mmoe_results = mmoe_data
             mmoe_display_name = self.get_display_name(mmoe_data[0], mmoe_results)
             history = mmoe_results["training_history"]
             if "train_losses" in history and history["train_losses"]:
                 epochs = range(1, len(history["train_losses"]) + 1)
+                total_epochs = len(history["train_losses"])
 
                 # MMoE with thick line and special color
                 ax.plot(
                     epochs, history["train_losses"],
-                    label=f"{mmoe_display_name} (90ep)",
+                    label=f"{mmoe_display_name} ({total_epochs}ep)",  # 🔧 使用实际轮数
                     color="#FF1744", linewidth=3, alpha=0.9,
                 )
 
-                # Add stage dividers
-                stage_boundaries = [30, 60]
-                for boundary in stage_boundaries:
-                    if boundary < len(history["train_losses"]):
-                        ax.axvline(x=boundary, color="#FF1744", linestyle=":", alpha=0.5)
+                # 🔧 修复：使用阶段信息来添加分隔线
+                stage_info = history.get("stage_info", [])
+                if stage_info:
+                    print(f"Using MMoE stage info with {len(stage_info)} stages")
+                    
+                    # 添加阶段分隔线和标签
+                    stage_labels = []
+                    stage_positions = []
+                    
+                    for i, stage in enumerate(stage_info):
+                        start_epoch = stage.get("start_epoch", 0)
+                        end_epoch = stage.get("end_epoch", start_epoch + stage.get("epochs", 10) - 1)
+                        stage_name = stage.get("stage_name", f"Stage{i+1}")
+                        
+                        # 添加分隔线（除了第一个阶段的开始）
+                        if i > 0 and start_epoch < total_epochs:
+                            ax.axvline(x=start_epoch, color="#FF1744", linestyle=":", alpha=0.5)
+                        
+                        # 计算标签位置（阶段中点）
+                        mid_point = (start_epoch + end_epoch + 1) // 2
+                        if mid_point < total_epochs:
+                            stage_positions.append(mid_point)
+                            
+                            # 生成简短的标签名称
+                            if "temporal" in stage_name.lower():
+                                label = "Temporal"
+                            elif "cf" in stage_name.lower():
+                                label = "CF"
+                            elif "mmoe" in stage_name.lower() or "fusion" in stage_name.lower():
+                                label = "MMoE"
+                            else:
+                                label = stage_name
+                            
+                            stage_labels.append(label)
 
-                # Annotate three stages
-                stage_labels = ["Temporal", "CF", "MMoE"]
-                stage_positions = [15, 45, 75]
-                for pos, label in zip(stage_positions, stage_labels):
-                    if pos < len(history["train_losses"]):
-                        ax.text(
-                            pos, max(history["train_losses"]) * 0.9, label,
-                            ha="center", va="center",
-                            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
-                            fontsize=9, color="#FF1744",
-                        )
+                    # 添加阶段标签
+                    for pos, label in zip(stage_positions, stage_labels):
+                        if pos < total_epochs:
+                            ax.text(
+                                pos, max(history["train_losses"]) * 0.9, label,
+                                ha="center", va="center",
+                                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+                                fontsize=9, color="#FF1744",
+                            )
+                else:
+                    print("No stage info found for MMoE, using fixed boundaries as fallback")
+                    # 回退到固定边界（但根据实际轮数调整）
+                    if total_epochs >= 90:
+                        stage_boundaries = [30, 60]
+                        stage_labels = ["Temporal", "CF", "MMoE"]
+                        stage_positions = [15, 45, 75]
+                    elif total_epochs >= 60:
+                        stage_boundaries = [30]
+                        stage_labels = ["Temporal", "CF", "MMoE"]
+                        stage_positions = [15, 45, total_epochs - 15]
+                    elif total_epochs >= 30:
+                        stage_boundaries = []
+                        stage_labels = ["Temporal", "CF"]
+                        stage_positions = [15, total_epochs - 15]
+                    else:
+                        stage_boundaries = []
+                        stage_labels = ["Temporal"]
+                        stage_positions = [total_epochs // 2]
+                    
+                    for boundary in stage_boundaries:
+                        if boundary < total_epochs:
+                            ax.axvline(x=boundary, color="#FF1744", linestyle=":", alpha=0.5)
+                    
+                    for pos, label in zip(stage_positions, stage_labels):
+                        if pos < total_epochs:
+                            ax.text(
+                                pos, max(history["train_losses"]) * 0.9, label,
+                                ha="center", va="center",
+                                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+                                fontsize=9, color="#FF1744",
+                            )
 
         ax.set_title("Training Loss Evolution (All Models)")
         ax.set_xlabel("Training Epochs")
@@ -1186,7 +1323,7 @@ class ModelComparison:
         ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=9)
         ax.grid(True, alpha=0.3)
 
-        # 2. Validation loss comparison - show all models
+        # 2. Validation loss comparison - show all models (类似修复)
         ax = axes[0, 1]
 
         # Plot other models' validation loss
@@ -1195,10 +1332,11 @@ class ModelComparison:
             history = results["training_history"]
             if "val_losses" in history and history["val_losses"]:
                 epochs = range(1, len(history["val_losses"]) + 1)
+                total_epochs = len(history["val_losses"])
                 color = colors[idx % len(colors)]
                 ax.plot(
                     epochs, history["val_losses"],
-                    label=f"{display_name} (30ep)",
+                    label=f"{display_name} ({total_epochs}ep)",  # 🔧 使用实际轮数
                     color=color, linewidth=2, alpha=0.8,
                 )
 
@@ -1209,16 +1347,26 @@ class ModelComparison:
             history = mmoe_results["training_history"]
             if "val_losses" in history and history["val_losses"]:
                 epochs = range(1, len(history["val_losses"]) + 1)
+                total_epochs = len(history["val_losses"])
                 ax.plot(
                     epochs, history["val_losses"],
-                    label=f"{mmoe_display_name} (90ep)",
+                    label=f"{mmoe_display_name} ({total_epochs}ep)",  # 🔧 使用实际轮数
                     color="#FF1744", linewidth=3, alpha=0.9,
                 )
 
-                # Add stage dividers
-                for boundary in [30, 60]:
-                    if boundary < len(history["val_losses"]):
-                        ax.axvline(x=boundary, color="#FF1744", linestyle=":", alpha=0.5)
+                # 🔧 添加阶段分隔线（使用阶段信息）
+                stage_info = history.get("stage_info", [])
+                if stage_info:
+                    for i, stage in enumerate(stage_info[1:], 1):  # 跳过第一个阶段
+                        start_epoch = stage.get("start_epoch", 0)
+                        if start_epoch < total_epochs:
+                            ax.axvline(x=start_epoch, color="#FF1744", linestyle=":", alpha=0.5)
+                else:
+                    # 回退到固定边界
+                    boundaries = [30, 60] if total_epochs >= 90 else [30] if total_epochs >= 60 else []
+                    for boundary in boundaries:
+                        if boundary < total_epochs:
+                            ax.axvline(x=boundary, color="#FF1744", linestyle=":", alpha=0.5)
 
         ax.set_title("Validation Loss Evolution (All Models)")
         ax.set_xlabel("Training Epochs")
@@ -1226,7 +1374,7 @@ class ModelComparison:
         ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=9)
         ax.grid(True, alpha=0.3)
 
-        # 3. Learning rate evolution comparison - show all models
+        # 3. Learning rate evolution comparison (类似修复)
         ax = axes[1, 0]
 
         # Plot other models' learning rates
@@ -1249,16 +1397,25 @@ class ModelComparison:
             history = mmoe_results["training_history"]
             if "learning_rates" in history and history["learning_rates"]:
                 epochs = range(1, len(history["learning_rates"]) + 1)
+                total_epochs = len(history["learning_rates"])
                 ax.plot(
                     epochs, history["learning_rates"],
                     label=f"{mmoe_display_name}",
                     color="#FF1744", linewidth=3, alpha=0.9,
                 )
 
-                # Add stage dividers
-                for boundary in [30, 60]:
-                    if boundary < len(history["learning_rates"]):
-                        ax.axvline(x=boundary, color="#FF1744", linestyle=":", alpha=0.5)
+                # 🔧 添加阶段分隔线
+                stage_info = history.get("stage_info", [])
+                if stage_info:
+                    for i, stage in enumerate(stage_info[1:], 1):
+                        start_epoch = stage.get("start_epoch", 0)
+                        if start_epoch < total_epochs:
+                            ax.axvline(x=start_epoch, color="#FF1744", linestyle=":", alpha=0.5)
+                else:
+                    boundaries = [30, 60] if total_epochs >= 90 else [30] if total_epochs >= 60 else []
+                    for boundary in boundaries:
+                        if boundary < total_epochs:
+                            ax.axvline(x=boundary, color="#FF1744", linestyle=":", alpha=0.5)
 
         ax.set_title("Learning Rate Evolution (All Models)")
         ax.set_xlabel("Training Epochs")
@@ -1267,16 +1424,22 @@ class ModelComparison:
         ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=9)
         ax.grid(True, alpha=0.3)
 
-        # 4. Fair 30-epoch comparison (all models normalized to 30 epochs)
+        # 4. 🔧 修复：公平比较 - 使用MMoE的最后一个阶段
         ax = axes[1, 1]
 
-        # Plot other models (original 30 epochs)
+        # Plot other models (原始轮数)
+        other_models_epochs = []
         for idx, (model_type, results) in enumerate(other_models):
             display_name = self.get_display_name(model_type, results)
             history = results["training_history"]
             if "train_losses" in history and history["train_losses"]:
-                epochs = range(1, min(31, len(history["train_losses"]) + 1))
-                train_losses = history["train_losses"][:30]
+                total_epochs = len(history["train_losses"])
+                other_models_epochs.append(total_epochs)
+                
+                # 为了公平比较，可以截取前30轮或者全部轮数
+                comparison_epochs = min(30, total_epochs)
+                epochs = range(1, comparison_epochs + 1)
+                train_losses = history["train_losses"][:comparison_epochs]
                 color = colors[idx % len(colors)]
                 ax.plot(
                     epochs, train_losses,
@@ -1284,23 +1447,51 @@ class ModelComparison:
                     color=color, linewidth=2, alpha=0.8,
                 )
 
-        # Plot MMoE's last 30 epochs (61-90 epochs)
+        # 🔧 修复：使用MMoE的最后一个阶段进行比较
         if mmoe_data:
             _, mmoe_results = mmoe_data
             mmoe_display_name = self.get_display_name(mmoe_data[0], mmoe_results)
             history = mmoe_results["training_history"]
-            if "train_losses" in history and len(history["train_losses"]) >= 90:
-                # Take last 30 epochs (61-90)
-                mmoe_last_30 = history["train_losses"][60:90]
-                epochs = range(1, len(mmoe_last_30) + 1)
-                ax.plot(
-                    epochs, mmoe_last_30,
-                    label=f"{mmoe_display_name} (Stage 3)",
-                    color="#FF1744", linewidth=3, alpha=0.9,
-                )
+            stage_info = history.get("stage_info", [])
+            
+            if stage_info and len(stage_info) > 0:
+                # 使用最后一个阶段的数据
+                last_stage = stage_info[-1]
+                start_epoch = last_stage.get("start_epoch", 0)
+                end_epoch = last_stage.get("end_epoch", start_epoch + last_stage.get("epochs", 10) - 1)
+                stage_name = last_stage.get("stage_name", "Final Stage")
+                
+                if "train_losses" in history and end_epoch < len(history["train_losses"]):
+                    # 提取最后阶段的损失
+                    last_stage_losses = history["train_losses"][start_epoch:end_epoch + 1]
+                    epochs = range(1, len(last_stage_losses) + 1)
+                    ax.plot(
+                        epochs, last_stage_losses,
+                        label=f"{mmoe_display_name} ({stage_name})",
+                        color="#FF1744", linewidth=3, alpha=0.9,
+                    )
+                    
+                    # 确定比较轮数
+                    comparison_epochs = len(last_stage_losses)
+            else:
+                # 回退：如果没有阶段信息，使用最后30轮
+                if "train_losses" in history and len(history["train_losses"]) >= 30:
+                    total_epochs = len(history["train_losses"])
+                    if total_epochs >= 60:
+                        # 使用最后30轮
+                        mmoe_last_stage = history["train_losses"][-30:]
+                        epochs = range(1, len(mmoe_last_stage) + 1)
+                        ax.plot(
+                            epochs, mmoe_last_stage,
+                            label=f"{mmoe_display_name} (Final 30)",
+                            color="#FF1744", linewidth=3, alpha=0.9,
+                        )
+                        comparison_epochs = 30
 
-        ax.set_title("Fair 30-Epoch Comparison\n(MMoE: Final Stage vs Others: Full Training)")
-        ax.set_xlabel("Epoch (within 30-epoch window)")
+        # 动态设置标题
+        avg_other_epochs = int(np.mean(other_models_epochs)) if other_models_epochs else 30
+        ax.set_title(f"Fair Comparison\n(Others: ~{avg_other_epochs} epochs vs MMoE: Final Stage)")
+        ax.set_xlabel("Epoch (within comparison window)")
         ax.set_ylabel("Training Loss")
         ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=9)
         ax.grid(True, alpha=0.3)
@@ -1313,7 +1504,7 @@ class ModelComparison:
         print(f"✅ Complete model training comparison saved to: {save_path}")
 
     def plot_mmoe_stage_performance_analysis(self):
-        """Plot 13: MMoE Stage Performance Analysis - Single chart"""
+        """Plot 13: MMoE Stage Performance Analysis - 修复阶段分析"""
         # Find MMoE model
         mmoe_results = None
         for model_type, results in self.results.items():
@@ -1326,12 +1517,12 @@ class ModelComparison:
             return
 
         history = mmoe_results["training_history"]
-
         if "train_losses" not in history:
             print("❌ MMoE training history not found")
             return
         
         total_epochs = len(history["train_losses"])
+        stage_info = history.get("stage_info", [])
         
         if total_epochs < 3:
             print(f"❌ MMoE training history insufficient for stage analysis: {total_epochs} epochs")
@@ -1340,29 +1531,73 @@ class ModelComparison:
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         fig.suptitle(f"MMoE Stage-by-Stage Performance Analysis ({total_epochs} Epochs)", fontsize=16, fontweight="bold")
 
-        # 🔧 修复：动态定义阶段
-        if total_epochs >= 90:
-            stages = {
-                "Stage 1: Temporal Modeling": (0, 30),
-                "Stage 2: CF Modeling": (30, 60),
-                "Stage 3: MMoE Fusion": (60, 90),
-            }
-        elif total_epochs >= 60:
-            stages = {
-                "Stage 1: Temporal Modeling": (0, 30),
-                "Stage 2: CF Modeling": (30, 60),
-                "Stage 3: MMoE Fusion": (60, total_epochs),
-            }
-        elif total_epochs >= 30:
-            stage_2_end = min(total_epochs, 60)
-            stages = {
-                "Stage 1: Temporal Modeling": (0, 30),
-                "Stage 2: CF Modeling": (30, stage_2_end),
-            }
+        # 🔧 修改：优先使用阶段信息
+        if stage_info and len(stage_info) > 0:
+            print(f"Using stage info with {len(stage_info)} stages")
+            
+            stages = {}
+            stage_endpoints = []  # 🔧 新增：记录阶段端点
+            stage_names_for_plot = []  # 🔧 新增：记录阶段名称
+            
+            for i, stage in enumerate(stage_info):
+                start_epoch = stage.get("start_epoch", 0)
+                end_epoch = stage.get("end_epoch", start_epoch + stage.get("epochs", 10) - 1)
+                stage_name = stage.get("stage_name", f"Stage{i+1}")
+                
+                # 生成显示名称
+                if "temporal" in stage_name.lower():
+                    display_name = "Stage 1: Temporal Modeling"
+                    short_name = "Stage 1"
+                elif "cf" in stage_name.lower():
+                    display_name = "Stage 2: CF Modeling"
+                    short_name = "Stage 2"
+                elif "mmoe" in stage_name.lower() or "fusion" in stage_name.lower():
+                    display_name = "Stage 3: MMoE Fusion"
+                    short_name = "Stage 3"
+                else:
+                    display_name = f"Stage {i+1}: {stage_name}"
+                    short_name = f"Stage {i+1}"
+                
+                stages[display_name] = (start_epoch, min(end_epoch + 1, total_epochs))
+                stage_endpoints.append(end_epoch)  # 🔧 记录端点
+                stage_names_for_plot.append(short_name)  # 🔧 记录短名称
+                
+            print(f"Stage endpoints: {stage_endpoints}")
+            print(f"Stage names: {stage_names_for_plot}")
+            
         else:
-            stages = {
-                "Stage 1: Temporal Modeling": (0, total_epochs),
-            }
+            # 回退到固定边界逻辑
+            print("Using fixed boundaries")
+            if total_epochs >= 90:
+                stages = {
+                    "Stage 1: Temporal Modeling": (0, 30),
+                    "Stage 2: CF Modeling": (30, 60),
+                    "Stage 3: MMoE Fusion": (60, 90),
+                }
+                stage_endpoints = [29, 59, 89]  # 🔧 修复：0-based索引
+                stage_names_for_plot = ["Stage 1", "Stage 2", "Stage 3"]
+            elif total_epochs >= 60:
+                stages = {
+                    "Stage 1: Temporal Modeling": (0, 30),
+                    "Stage 2: CF Modeling": (30, 60),
+                    "Stage 3: MMoE Fusion": (60, total_epochs),
+                }
+                stage_endpoints = [29, 59, total_epochs - 1]
+                stage_names_for_plot = ["Stage 1", "Stage 2", "Stage 3"]
+            elif total_epochs >= 30:
+                stage_2_end = min(total_epochs, 60)
+                stages = {
+                    "Stage 1: Temporal Modeling": (0, 30),
+                    "Stage 2: CF Modeling": (30, stage_2_end),
+                }
+                stage_endpoints = [29, stage_2_end - 1]
+                stage_names_for_plot = ["Stage 1", "Stage 2"]
+            else:
+                stages = {
+                    "Stage 1: Temporal Modeling": (0, total_epochs),
+                }
+                stage_endpoints = [total_epochs - 1]
+                stage_names_for_plot = ["Stage 1"]
 
         colors = ["#FF6B6B", "#4ECDC4", "#45B7D1"][:len(stages)]
 
@@ -1378,14 +1613,15 @@ class ModelComparison:
                 stage_avg_losses.append(avg_loss)
                 stage_names.append(stage_name.split(":")[0])
 
-        bars = ax.bar(stage_names, stage_avg_losses, color=colors[:len(stage_names)])
-        ax.set_title("Average Training Loss by Stage")
-        ax.set_ylabel("Average MSE Loss")
+        if stage_avg_losses:
+            bars = ax.bar(stage_names, stage_avg_losses, color=colors[:len(stage_names)])
+            ax.set_title("Average Training Loss by Stage")
+            ax.set_ylabel("Average MSE Loss")
 
-        for bar, loss in zip(bars, stage_avg_losses):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
-                   f"{loss:.4f}", ha="center", va="bottom")
+            for bar, loss in zip(bars, stage_avg_losses):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
+                    f"{loss:.4f}", ha="center", va="bottom")
 
         # 2. Loss reduction analysis
         ax = axes[0, 1]
@@ -1393,42 +1629,52 @@ class ModelComparison:
 
         for idx, (stage_name, (start, end)) in enumerate(stages.items()):
             stage_losses = history["train_losses"][start:end]
-            if stage_losses:
+            if stage_losses and len(stage_losses) > 1:
                 initial_loss = stage_losses[0]
                 final_loss = stage_losses[-1]
                 reduction = ((initial_loss - final_loss) / initial_loss * 100) if initial_loss > 0 else 0
                 loss_reductions.append(reduction)
+            else:
+                loss_reductions.append(0)
 
-        bars = ax.bar(stage_names, loss_reductions, color=colors[:len(stage_names)])
-        ax.set_title("Loss Reduction by Stage")
-        ax.set_ylabel("Loss Reduction (%)")
+        if loss_reductions and len(loss_reductions) == len(stage_names):
+            bars = ax.bar(stage_names, loss_reductions, color=colors[:len(stage_names)])
+            ax.set_title("Loss Reduction by Stage")
+            ax.set_ylabel("Loss Reduction (%)")
 
-        for bar, reduction in zip(bars, loss_reductions):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
-                   f"{reduction:.1f}%", ha="center", va="bottom")
+            for bar, reduction in zip(bars, loss_reductions):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2.0, height + max(loss_reductions)*0.01,
+                    f"{reduction:.1f}%", ha="center", va="bottom")
 
         # 3. Learning rate decay analysis
         ax = axes[0, 2]
-        if "learning_rates" in history and len(history["learning_rates"]) >= 90:
+        if "learning_rates" in history and history["learning_rates"] and len(history["learning_rates"]) >= total_epochs:
             lr_changes = []
 
             for idx, (stage_name, (start, end)) in enumerate(stages.items()):
                 stage_lrs = history["learning_rates"][start:end]
-                if stage_lrs:
+                if stage_lrs and len(stage_lrs) > 1:
                     initial_lr = stage_lrs[0]
                     final_lr = stage_lrs[-1]
                     change = ((initial_lr - final_lr) / initial_lr * 100) if initial_lr > 0 else 0
                     lr_changes.append(change)
+                else:
+                    lr_changes.append(0)
 
-            bars = ax.bar(stage_names, lr_changes, color=colors[:len(stage_names)])
+            if lr_changes and len(lr_changes) == len(stage_names):
+                bars = ax.bar(stage_names, lr_changes, color=colors[:len(stage_names)])
+                ax.set_title("Learning Rate Decay by Stage")
+                ax.set_ylabel("LR Decay (%)")
+
+                for bar, change in zip(bars, lr_changes):
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2.0, height + max(lr_changes)*0.01,
+                        f"{change:.1f}%", ha="center", va="bottom")
+        else:
+            ax.text(0.5, 0.5, "Learning Rate Data\nNot Available", 
+                ha='center', va='center', transform=ax.transAxes, fontsize=12)
             ax.set_title("Learning Rate Decay by Stage")
-            ax.set_ylabel("LR Decay (%)")
-
-            for bar, change in zip(bars, lr_changes):
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
-                       f"{change:.1f}%", ha="center", va="bottom")
 
         # 4. Training stability analysis (loss variance)
         ax = axes[1, 0]
@@ -1440,35 +1686,45 @@ class ModelComparison:
                 loss_std = np.std(stage_losses)
                 loss_stds.append(loss_std)
 
-        bars = ax.bar(stage_names, loss_stds, color=colors[:len(stage_names)])
-        ax.set_title("Training Stability by Stage")
-        ax.set_ylabel("Loss Standard Deviation")
+        if loss_stds and len(loss_stds) == len(stage_names):
+            bars = ax.bar(stage_names, loss_stds, color=colors[:len(stage_names)])
+            ax.set_title("Training Stability by Stage")
+            ax.set_ylabel("Loss Standard Deviation")
 
-        for bar, std in zip(bars, loss_stds):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
-                   f"{std:.4f}", ha="center", va="bottom")
+            for bar, std in zip(bars, loss_stds):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
+                    f"{std:.4f}", ha="center", va="bottom")
 
-        # 5. Stage transition loss changes
+        # 5. 🔧 修复：阶段过渡损失变化 - 使用动态端点
         ax = axes[1, 1]
-        stage_endpoints = [30, 60, 90]
-        endpoint_losses = [
-            history["train_losses"][ep - 1]
-            for ep in stage_endpoints
-            if ep <= len(history["train_losses"])
-        ]
+        
+        # 使用动态确定的端点
+        endpoint_losses = []
+        actual_labels = []
+        
+        for i, endpoint in enumerate(stage_endpoints):
+            if endpoint < len(history["train_losses"]):
+                endpoint_losses.append(history["train_losses"][endpoint])
+                actual_labels.append(stage_names_for_plot[i])
+                print(f"Endpoint {i}: epoch {endpoint+1}, loss {history['train_losses'][endpoint]:.4f}")
 
-        x_pos = range(len(endpoint_losses))
-        ax.plot(x_pos, endpoint_losses, "o-", linewidth=3, markersize=8, color="#FF1744")
-        ax.set_title("Loss Evolution Across Stages")
-        ax.set_ylabel("Training Loss at Stage End")
-        ax.set_xlabel("Stage")
-        ax.set_xticks(x_pos)
-        ax.set_xticklabels(stage_names)
-        ax.grid(True, alpha=0.3)
+        if endpoint_losses:
+            x_pos = range(len(endpoint_losses))
+            ax.plot(x_pos, endpoint_losses, "o-", linewidth=3, markersize=8, color="#FF1744")
+            ax.set_title("Loss Evolution Across Stages")
+            ax.set_ylabel("Training Loss at Stage End")
+            ax.set_xlabel("Stage")
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(actual_labels)
+            ax.grid(True, alpha=0.3)
 
-        for i, loss in enumerate(endpoint_losses):
-            ax.text(i, loss + max(endpoint_losses)*0.01, f"{loss:.4f}", ha="center", va="bottom")
+            for i, loss in enumerate(endpoint_losses):
+                ax.text(i, loss + max(endpoint_losses)*0.01, f"{loss:.4f}", ha="center", va="bottom")
+                
+            print(f"✅ Loss evolution plot: {len(endpoint_losses)} points")
+        else:
+            print("❌ No valid endpoints found for loss evolution plot")
 
         # 6. Final test performance
         ax = axes[1, 2]
@@ -1477,14 +1733,15 @@ class ModelComparison:
         values = [test_metrics[metric] for metric in metrics if metric in test_metrics]
         metrics = [metric for metric in metrics if metric in test_metrics]
 
-        bars = ax.bar(metrics, values, color="#9C27B0")
-        ax.set_title("Final MMoE Test Performance")
-        ax.set_ylabel("Metric Value")
+        if values:
+            bars = ax.bar(metrics, values, color="#9C27B0")
+            ax.set_title("Final MMoE Test Performance")
+            ax.set_ylabel("Metric Value")
 
-        for bar, value in zip(bars, values):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
-                   f"{value:.4f}", ha="center", va="bottom")
+            for bar, value in zip(bars, values):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2.0, height + height*0.01,
+                    f"{value:.4f}", ha="center", va="bottom")
 
         plt.tight_layout()
         
@@ -1645,36 +1902,35 @@ class ModelComparison:
 
     def plot_efficiency_analysis(self):
         """Plot 15: Model Efficiency Analysis - Single chart"""
-        plt.figure(figsize=(16, 10))
-    
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle("Model Efficiency Analysis - Multi-Dimensional Comparison", fontsize=16, fontweight='bold')
+        
         organized_models = self.organize_models()
         
-        # Extract data for efficiency analysis
+        # 提取数据
+        model_names = []
         rmse_values = []
         param_counts = []
         training_times = []
-        model_names = []
-        
-        for model_type, results, display_name in organized_models:
-            test_metrics = results.get("test_metrics", {})
-            model_params = results.get("model_params", {})
-            training_history = results.get("training_history", {})
-            
-            rmse = test_metrics.get("RMSE", 0)
-            params = model_params.get("total_params", 0)
-            train_time = training_history.get("total_training_time", 0)
-            
-            rmse_values.append(rmse)
-            param_counts.append(params)
-            training_times.append(train_time)
-            model_names.append(display_name)
+        inference_times = []
         
         # 🔧 颜色映射：包含MMoE阶段
         colors = []
         mmoe_stage_colors = ["#FF6B6B", "#4ECDC4", "#45B7D1"]
         mmoe_stage_count = 0
         
-        for model_type, results, _ in organized_models:
+        for model_type, results, display_name in organized_models:
+            test_metrics = results.get("test_metrics", {})
+            model_params = results.get("model_params", {})
+            training_history = results.get("training_history", {})
+            
+            model_names.append(display_name)
+            rmse_values.append(test_metrics.get("RMSE", 0))
+            param_counts.append(model_params.get("total_params", 0))
+            training_times.append(training_history.get("total_training_time", 0))
+            inference_times.append(test_metrics.get("Inference_Time", 0))
+            
+            # 颜色分配
             if results.get("is_mmoe_stage", False):
                 colors.append(mmoe_stage_colors[mmoe_stage_count % len(mmoe_stage_colors)])
                 mmoe_stage_count += 1
@@ -1684,50 +1940,167 @@ class ModelComparison:
                 colors.append("#9C27B0")  # Purple
             else:
                 colors.append("#2196F3")  # Blue
+
+        # 创建简短但唯一的标签
+        def create_short_labels(names):
+            """创建简短但唯一的模型标签"""
+            short_labels = []
+            for name in names:
+                if "Baseline" in name:
+                    short_labels.append("Baseline CF")
+                elif "User Time-Aware" in name:
+                    short_labels.append("User Time")
+                elif "Independent Time" in name:
+                    short_labels.append("Independent Time")
+                elif "User-Movie Time" in name:
+                    short_labels.append("User-Movie Time")
+                elif "Two-Stage MMoE" in name:
+                    short_labels.append("Two-Stage MMoE")
+                elif "MMoE Stage 1" in name:
+                    short_labels.append("MMoE S1")
+                elif "MMoE Stage 2" in name:
+                    short_labels.append("MMoE S2")
+                elif "MMoE Stage 3" in name:
+                    short_labels.append("MMoE S3")
+                else:
+                    # 备用：使用前两个单词
+                    words = name.split()
+                    if len(words) >= 2:
+                        short_labels.append(f"{words[0]} {words[1]}")
+                    else:
+                        short_labels.append(name)
+            return short_labels
         
-        # Normalize bubble sizes (使用训练时间作为气泡大小)
-        if max(training_times) > 0:
-            bubble_sizes = [(time / max(training_times) * 1000 + 100) for time in training_times]
-        else:
-            bubble_sizes = [100] * len(training_times)
+        short_model_names = create_short_labels(model_names)
+
+        # 1. 训练效率：训练时间 vs 性能提升
+        ax = axes[0, 0]
         
-        scatter = plt.scatter(param_counts, rmse_values, s=bubble_sizes, c=colors, alpha=0.7, edgecolors='black')
+        # 计算相对于基线的性能提升
+        baseline_rmse = rmse_values[0] if len(rmse_values) > 0 else 1.0  # 假设第一个是基线
+        performance_improvement = [(baseline_rmse - rmse) / baseline_rmse * 100 for rmse in rmse_values]
         
-        # Add model labels with epoch info
-        for i, (name, (model_type, results, _)) in enumerate(zip(model_names, organized_models)):
-            offset_x, offset_y = 5, 5
-            if results.get("is_mmoe_stage", False):
-                epochs = results.get("training_history", {}).get("total_epochs", 0)
-                label = f"{name}\n({epochs}ep)"
-            else:
-                label = name
-            
-            plt.annotate(label, (param_counts[i], rmse_values[i]), 
-                        xytext=(offset_x, offset_y), textcoords='offset points', 
-                        fontsize=9, ha='left', va='bottom',
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
+        scatter = ax.scatter(training_times, performance_improvement, c=colors, s=100, alpha=0.7, edgecolors='black')
         
-        plt.xlabel("Model Parameters", fontsize=12)
-        plt.ylabel("RMSE (Lower is Better)", fontsize=12)
-        plt.title("Model Efficiency Analysis - Including MMoE Stages\n(Bubble size represents training time, MMoE stages show individual performance)", 
-                fontsize=16, fontweight='bold')
+        # 添加模型标签（使用简短名称）
+        for i, short_name in enumerate(short_model_names):
+            ax.annotate(short_name, (training_times[i], performance_improvement[i]), 
+                    xytext=(5, 5), textcoords='offset points', 
+                    fontsize=8, ha='left', va='bottom',
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
         
-        # Add legend for bubble sizes
-        if max(training_times) > 0:
-            max_time = max(training_times)
-            legend_times = [max_time * 0.2, max_time * 0.6, max_time]
-            legend_sizes = [time / max_time * 1000 + 100 for time in legend_times]
-            legend_labels = [f"{time:.1f}s" for time in legend_times]
-            legend_elements = [plt.scatter([], [], s=size, c='gray', alpha=0.6) for size in legend_sizes]
-            plt.legend(legend_elements, legend_labels, title="Training Time", loc='upper right')
+        ax.set_xlabel("Training Time (seconds)")
+        ax.set_ylabel("Performance Improvement vs Baseline (%)")
+        ax.set_title("Training Efficiency\n(Higher improvement with less time is better)")
+        ax.grid(True, alpha=0.3)
+        ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, label='Baseline Performance')
+
+        # 2. 参数效率：参数数量 vs 性能
+        ax = axes[0, 1]
         
-        plt.grid(True, alpha=0.3)
+        # 计算参数效率（RMSE/参数数量，越小越好）
+        param_efficiency = [rmse / (params / 1000) if params > 0 else 0 for rmse, params in zip(rmse_values, param_counts)]
+        
+        bars = ax.bar(range(len(model_names)), param_efficiency, color=colors, alpha=0.8)
+        ax.set_xlabel("Models")
+        ax.set_ylabel("RMSE per 1K Parameters (Lower is Better)")
+        ax.set_title("Parameter Efficiency\n(RMSE normalized by parameter count)")
+        ax.set_xticks(range(len(model_names)))
+        # 🔧 修复：使用简短名称
+        ax.set_xticklabels(short_model_names, rotation=45, ha='right', fontsize=9)
+        
+        # 添加数值标签
+        for bar, value in zip(bars, param_efficiency):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                f'{value:.6f}', ha='center', va='bottom', fontsize=8)
+
+        # 3. 推理效率：推理时间 vs 性能
+        ax = axes[1, 0]
+        
+        scatter = ax.scatter(inference_times, rmse_values, c=colors, s=100, alpha=0.7, edgecolors='black')
+        
+        # 添加模型标签（使用简短名称）
+        for i, short_name in enumerate(short_model_names):
+            ax.annotate(short_name, (inference_times[i], rmse_values[i]), 
+                    xytext=(5, 5), textcoords='offset points', 
+                    fontsize=8, ha='left', va='bottom',
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
+        
+        ax.set_xlabel("Inference Time (seconds)")
+        ax.set_ylabel("RMSE")
+        ax.set_title("Inference Efficiency\n(Lower RMSE with faster inference is better)")
+        ax.grid(True, alpha=0.3)
+
+        # 4. 综合效率评分
+        ax = axes[1, 1]
+        
+        # 标准化各项指标（0-1范围）
+        def normalize(values, reverse=False):
+            if not values or max(values) == min(values):
+                return [0.5] * len(values)
+            normalized = [(v - min(values)) / (max(values) - min(values)) for v in values]
+            return [(1 - n) for n in normalized] if reverse else normalized
+        
+        # 标准化指标（越小越好的指标需要reverse=True）
+        norm_rmse = normalize(rmse_values, reverse=True)  # RMSE越小越好
+        norm_training_time = normalize(training_times, reverse=True)  # 训练时间越少越好
+        norm_inference_time = normalize(inference_times, reverse=True)  # 推理时间越少越好
+        norm_param_efficiency = normalize(param_efficiency, reverse=True)  # 参数效率越小越好
+        
+        # 计算综合效率评分（平均值）
+        efficiency_scores = []
+        for i in range(len(model_names)):
+            score = (norm_rmse[i] + norm_training_time[i] + norm_inference_time[i] + norm_param_efficiency[i]) / 4
+            efficiency_scores.append(score)
+        
+        bars = ax.bar(range(len(model_names)), efficiency_scores, color=colors, alpha=0.8)
+        ax.set_xlabel("Models")
+        ax.set_ylabel("Efficiency Score (Higher is Better)")
+        ax.set_title("Overall Efficiency Score\n(Weighted average of all efficiency metrics)")
+        ax.set_xticks(range(len(model_names)))
+        # 🔧 修复：使用简短名称
+        ax.set_xticklabels(short_model_names, rotation=45, ha='right', fontsize=9)
+        ax.set_ylim(0, 1)
+        
+        # 添加数值标签
+        for bar, value in zip(bars, efficiency_scores):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                f'{value:.3f}', ha='center', va='bottom', fontsize=8)
+        
+        # 添加颜色图例
+        legend_elements = []
+        legend_labels = []
+        
+        # 添加基线、时间感知、MMoE的图例
+        if any("baseline" in model_type.lower() for model_type, _, _ in organized_models):
+            legend_elements.append(plt.scatter([], [], c="#FF6B6B", s=100, alpha=0.7))
+            legend_labels.append("Baseline")
+        
+        if any(not results.get("is_mmoe_stage", False) and "mmoe" not in model_type.lower() and "baseline" not in model_type.lower() 
+            for model_type, results, _ in organized_models):
+            legend_elements.append(plt.scatter([], [], c="#2196F3", s=100, alpha=0.7))
+            legend_labels.append("Time-Aware")
+        
+        if any(results.get("is_mmoe_stage", False) for _, results, _ in organized_models):
+            legend_elements.append(plt.scatter([], [], c="#4ECDC4", s=100, alpha=0.7))
+            legend_labels.append("MMoE Stages")
+        
+        if any("mmoe" in model_type.lower() and not results.get("is_mmoe_stage", False) 
+            for model_type, results, _ in organized_models):
+            legend_elements.append(plt.scatter([], [], c="#9C27B0", s=100, alpha=0.7))
+            legend_labels.append("MMoE Original")
+        
+        if legend_elements:
+            ax.legend(legend_elements, legend_labels, loc='upper right', fontsize=9)
+
         plt.tight_layout()
         
         save_path = self.output_dir / "15_efficiency_analysis.png"
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Successfully saved efficiency analysis to: {save_path}")
+        print(f"✅ Model efficiency analysis saved to: {save_path}")
 
     def run_complete_analysis(self):
         """Run complete analysis workflow - Generate all individual charts"""
