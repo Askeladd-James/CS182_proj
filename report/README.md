@@ -3,8 +3,9 @@
 This project implements and evaluates several movie recommendation models, including traditional collaborative filtering methods and more advanced deep learning approaches.
 
 ## Project Structure
+```
 CS182_PROJ-MAIN/
-│s
+│
 ├── data/
 │   ├── ... (processed data)
 │
@@ -36,6 +37,7 @@ CS182_PROJ-MAIN/
 ├── README.md
 ├── requirements.txt
 └── SVD_Model.ipynb
+```
 
 ## Models
 This repository includes the following models:
